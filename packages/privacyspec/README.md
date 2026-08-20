@@ -3,6 +3,9 @@
 PrivacySpec adds passive, sanitized privacy and security data-flow regression to existing
 Playwright tests. This package is an experimental public beta.
 
+Install the explicit `beta` tag. npm also exposes this first and currently only registry version
+through its default tag; that does not indicate stable support.
+
 PrivacySpec reports technical observations. It is not a legal compliance certification tool.
 
 ## Install

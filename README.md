@@ -7,7 +7,8 @@ cases.
 
 > **Public beta:** PrivacySpec has passed controlled and independently authored Playwright pilot
 > validation, but has not yet accumulated broad production usage. Expect API refinement before a
-> stable release.
+> stable release. Install the explicit `beta` tag; npm also exposes this first and currently only
+> registry version through its default tag.
 
 PrivacySpec reports technical observations. It is not a legal compliance certification tool.
 

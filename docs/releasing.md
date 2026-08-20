@@ -1,7 +1,9 @@
 # Maintainer release process
 
-PrivacySpec uses npm prereleases during public validation. The `latest` tag is reserved for a
-separately approved stable release.
+PrivacySpec uses npm prereleases during public validation. Consumers should select `beta`
+explicitly. npm exposes the first and only published version through its default `latest` tag as
+well; this does not make the prerelease stable. Once a stable version exists, `latest` must point to
+that stable line and later prereleases must continue to use `beta`.
 
 ## First beta
 
