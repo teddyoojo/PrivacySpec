@@ -1,0 +1,38 @@
+name: Stage npm release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          registry-url: https://registry.npmjs.org
+
+      - name: Enable pinned pnpm
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium
+        run: pnpm --filter @privacyspec/playwright exec playwright install chromium
+
+      - name: Validate release candidate
+        run: pnpm check && pnpm test
+
+      - name: Stage package for maintainer approval
+        run: npm stage publish
+        working-directory: packages/privacyspec

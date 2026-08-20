@@ -1,0 +1,65 @@
+{
+  "name": "@privacyspec/playwright",
+  "version": "0.1.0-beta.1",
+  "description": "Passive privacy and security data-flow regression for existing Playwright tests",
+  "license": "Apache-2.0",
+  "author": "teddyoojo",
+  "keywords": [
+    "playwright",
+    "privacy",
+    "security",
+    "testing",
+    "data-flow",
+    "regression-testing"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/teddyoojo/PrivacySpec.git",
+    "directory": "packages/privacyspec"
+  },
+  "homepage": "https://github.com/teddyoojo/PrivacySpec#readme",
+  "bugs": {
+    "url": "https://github.com/teddyoojo/PrivacySpec/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "privacyspec": "./dist/cli/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./reporter": {
+      "types": "./dist/playwright/reporter.d.ts",
+      "import": "./dist/playwright/reporter.js",
+      "default": "./dist/playwright/reporter.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "prepack": "pnpm run build",
+    "test": "pnpm run build && node --test"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "peerDependencies": {
+    "@playwright/test": ">=1.58.1 <2"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@types/node": "24.13.3"
+  }
+}

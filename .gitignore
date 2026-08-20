@@ -1,0 +1,19 @@
+node_modules/
+dist/
+
+# Playwright output
+playwright-report/
+test-results/
+blob-report/
+
+# PrivacySpec runtime artifacts
+.privacyspec/
+privacyspec-report.json
+
+# Environment and editor files
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+*.log

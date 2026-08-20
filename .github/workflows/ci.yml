@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: Enable pinned pnpm
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium and system dependencies
+        run: pnpm --filter @privacyspec/playwright exec playwright install --with-deps chromium
+
+      - name: Check formatting and lint
+        run: pnpm check
+
+      - name: Build and test
+        run: pnpm test
+
+      - name: Verify npm package contents
+        run: npm pack --dry-run --json
+        working-directory: packages/privacyspec
