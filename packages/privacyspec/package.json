@@ -49,7 +49,7 @@
   },
   "scripts": {
     "build": "tsc --project tsconfig.json",
-    "prepack": "pnpm run build",
+    "prepack": "pnpm run build && node scripts/prepare-package.mjs",
     "test": "pnpm run build && node --test"
   },
   "engines": {

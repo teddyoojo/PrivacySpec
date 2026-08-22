@@ -34,7 +34,6 @@ test("the npm package contains only distributable files", async (context) => {
     [
       "pack",
       "--json",
-      "--ignore-scripts",
       "--pack-destination",
       packDirectory,
       "--cache",
@@ -72,6 +71,15 @@ test("the npm package contains only distributable files", async (context) => {
     false,
   );
   assert.equal(paths.includes("privacyspec-report.json"), false);
+
+  const { stdout: verboseArchive } = await execFileAsync("tar", [
+    "-tvzf",
+    join(packDirectory, archive),
+  ]);
+  const cliEntry = verboseArchive
+    .split("\n")
+    .find((line) => line.endsWith(" package/dist/cli/index.js"));
+  assert.match(cliEntry ?? "", /^-rwxr-xr-x\s/u);
 });
 
 test("the TypeScript entry point is loadable", async () => {
