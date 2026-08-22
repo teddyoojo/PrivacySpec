@@ -1,8 +1,10 @@
-import { normalizePath, redactSensitive } from "../correlate/redact.js";
+import { canonicalizeEndpointPath, redactSensitive, sanitizeLabel } from "../correlate/redact.js";
 import { createRedactionValues } from "../correlate/transforms.js";
 import type {
   ClassificationEvidence,
+  ControlSensitiveSourceObservation,
   RawSensitiveSource,
+  ResponseSensitiveSourceObservation,
   SensitiveSourceObservation,
   SourceControlMetadata,
   SourceObservation,
@@ -51,7 +53,7 @@ const sanitizeControl = (
 const sanitizePage = (
   pageUrl: string,
   sensitiveValues: readonly string[],
-): SensitiveSourceObservation["page"] => {
+): { origin: string; path: string } => {
   try {
     const url = new URL(pageUrl);
     return {
@@ -59,7 +61,7 @@ const sanitizePage = (
         url.origin === "null"
           ? "opaque"
           : redactSensitive(url.origin, sensitiveValues).slice(0, 2_048),
-      path: normalizePath(url.pathname, sensitiveValues),
+      path: canonicalizeEndpointPath(url.pathname, sensitiveValues),
     };
   } catch {
     return { origin: "unknown", path: "/" };
@@ -75,15 +77,35 @@ export const sanitizeSensitiveSources = (
   const identities = new Set<string>();
 
   for (const source of sources) {
-    const observation: SensitiveSourceObservation = {
-      kind: "sensitive-source",
-      category: source.category,
-      confidence: source.confidence,
-      evidence: sanitizeEvidence(source.evidence, sensitiveValues),
-      control: sanitizeControl(source.control, sensitiveValues),
-      page: sanitizePage(source.pageUrl, sensitiveValues),
-      observedBy: source.observedBy,
-    };
+    let observation: SensitiveSourceObservation;
+    if (source.kind === "response-json") {
+      const responseObservation: ResponseSensitiveSourceObservation = {
+        kind: "sensitive-source",
+        category: source.category,
+        confidence: source.confidence,
+        evidence: sanitizeEvidence(source.evidence, sensitiveValues),
+        sourceKind: "response-json",
+        provenance: {
+          origin: redactSensitive(source.provenance.origin, sensitiveValues).slice(0, 2_048),
+          endpoint: canonicalizeEndpointPath(source.provenance.endpoint, sensitiveValues),
+          location: sanitizeLabel(source.provenance.location, sensitiveValues, 1_024),
+        },
+        observedBy: "response",
+      };
+      observation = responseObservation;
+    } else {
+      const controlObservation: ControlSensitiveSourceObservation = {
+        kind: "sensitive-source",
+        category: source.category,
+        confidence: source.confidence,
+        evidence: sanitizeEvidence(source.evidence, sensitiveValues),
+        sourceKind: source.control.elementKind === "contenteditable" ? "dom-control" : "form-input",
+        control: sanitizeControl(source.control, sensitiveValues),
+        page: sanitizePage(source.pageUrl, sensitiveValues),
+        observedBy: source.observedBy,
+      };
+      observation = controlObservation;
+    }
     const identity = JSON.stringify(observation);
     if (!identities.has(identity)) {
       identities.add(identity);

@@ -18,7 +18,8 @@ const html = `<!doctype html>
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ email }),
         });
-        if (response.ok) document.querySelector("#status").textContent = "Profile saved";
+        const result = await response.json();
+        if (response.ok && result.saved) document.querySelector("#status").textContent = "Profile saved";
       });
     </script>
   </body>
@@ -34,8 +35,8 @@ const server = createServer((request, response) => {
   if (request.method === "POST" && request.url === "/profile") {
     request.resume();
     request.on("end", () => {
-      response.writeHead(204);
-      response.end();
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"saved":true}');
     });
     return;
   }

@@ -1,17 +1,9 @@
 {
   "name": "@privacyspec/playwright",
-  "version": "0.1.0-beta.1",
-  "description": "Passive privacy and security data-flow regression for existing Playwright tests",
+  "version": "0.1.0-beta.2",
+  "description": "Continuous privacy QA for Playwright",
   "license": "Apache-2.0",
   "author": "teddyoojo",
-  "keywords": [
-    "playwright",
-    "privacy",
-    "security",
-    "testing",
-    "data-flow",
-    "regression-testing"
-  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/teddyoojo/PrivacySpec.git",
@@ -21,6 +13,14 @@
   "bugs": {
     "url": "https://github.com/teddyoojo/PrivacySpec/issues"
   },
+  "keywords": [
+    "playwright",
+    "privacy",
+    "security",
+    "testing",
+    "data-flow",
+    "regression-testing"
+  ],
   "publishConfig": {
     "access": "public"
   },

@@ -1,4 +1,4 @@
-import { normalizePath, redactSensitive, sanitizeLabel } from "../correlate/redact.js";
+import { canonicalizeEndpointPath, redactSensitive, sanitizeLabel } from "../correlate/redact.js";
 import { createRedactionValues } from "../correlate/transforms.js";
 import type { RawSensitiveSource } from "../discovery/source-model.js";
 import type {
@@ -23,7 +23,7 @@ const sanitizePage = (
     return {
       origin:
         url.origin === "null" ? "opaque" : redactSensitive(url.origin, variants).slice(0, 2_048),
-      path: normalizePath(url.pathname, variants),
+      path: canonicalizeEndpointPath(url.pathname, variants),
     };
   } catch {
     return { origin: "unknown", path: "/" };
@@ -40,7 +40,7 @@ const sanitizeNetwork = (sink: RawNetworkSink, variants: string[]): NetworkSinkO
         url.origin === "null" ? "opaque" : redactSensitive(url.origin, variants).slice(0, 2_048),
       host: url.hostname ? redactSensitive(url.hostname, variants).slice(0, 255) : "unknown",
     };
-    endpoint = normalizePath(url.pathname, variants);
+    endpoint = canonicalizeEndpointPath(url.pathname, variants);
   } catch {
     // Keep conservative placeholders for malformed URLs.
   }

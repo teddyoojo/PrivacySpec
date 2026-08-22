@@ -57,6 +57,52 @@ test("registries accept only their own stream token and erase values on disposal
   registryB.dispose();
 });
 
+test("streamed control sources retain the browser's captured native event time", () => {
+  const registry = new SensitiveValueRegistry();
+  const streamed = source(["streamed", "example.test"].join("@"));
+  registry.recordStreamEvent({
+    version: 1,
+    token: registry.streamToken,
+    kind: "source",
+    source: { ...streamed, timestamp: 10 },
+  });
+  registry.add({
+    ...source(["fallback", "example.test"].join("@")),
+    observedBy: "fallback",
+    timestamp: 20,
+  });
+
+  assert.deepEqual(
+    registry.snapshot().sources.map((source) => source.timestamp),
+    [10, 20],
+  );
+  registry.dispose();
+});
+
+test("duplicate response sources retain the earliest event regardless of parse order", () => {
+  const registry = new SensitiveValueRegistry();
+  const raw = ["response", "example.test"].join("@");
+  const responseSource = (timestamp) => ({
+    kind: "response-json",
+    raw,
+    category: "personal.email",
+    confidence: "high",
+    evidence: [{ kind: "json-key", value: "email" }],
+    provenance: {
+      origin: "https://app.example.test",
+      endpoint: "/api/profile",
+      location: "json.email",
+    },
+    timestamp,
+    observedBy: "response",
+  });
+
+  assert.equal(registry.addResponse(responseSource(50)), "added");
+  assert.equal(registry.addResponse(responseSource(10)), "duplicate");
+  assert.equal(registry.snapshot().sources[0]?.timestamp, 10);
+  registry.dispose();
+});
+
 test("registry validates page payloads, deduplicates values, and reports its safety limit", () => {
   const registry = new SensitiveValueRegistry();
   const duplicate = ["duplicate", "example.test"].join("@");

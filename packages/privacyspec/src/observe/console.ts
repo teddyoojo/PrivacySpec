@@ -1,6 +1,6 @@
 import type { BrowserContext, ConsoleMessage, JSHandle } from "@playwright/test";
 import type { RawConsoleSink, RawSinkMaterial } from "./sink-model.js";
-import { MAX_CONSOLE_SINKS_PER_TEST, type SinkRunRegistry } from "./sink-registry.js";
+import { MAX_CONSOLE_SINKS_PER_TEST } from "./sink-registry.js";
 
 const MAX_CONSOLE_ARGUMENTS = 20;
 const MAX_CONSOLE_VALUE_LENGTH = 65_536;
@@ -91,6 +91,11 @@ export const serializeConsoleValueInPage = (
   }
 };
 
+export interface ConsoleSinkConsumer {
+  addConsole(sink: RawConsoleSink, message?: ConsoleMessage): void;
+  markLimitReached(collector: "console"): void;
+}
+
 const readConsoleArgument = (handle: JSHandle): Promise<string> =>
   new Promise((resolve) => {
     let settled = false;
@@ -124,7 +129,11 @@ const readConsoleArgument = (handle: JSHandle): Promise<string> =>
     }
   });
 
-const captureConsoleMessage = async (message: ConsoleMessage): Promise<RawConsoleSink> => {
+const captureConsoleMessage = async (
+  message: ConsoleMessage,
+  timestamp: number,
+  renderedText: string | undefined,
+): Promise<RawConsoleSink> => {
   const handles = message.args();
   const materials: RawSinkMaterial[] = await Promise.all(
     handles.slice(0, MAX_CONSOLE_ARGUMENTS).map(async (handle, index) => ({
@@ -132,8 +141,7 @@ const captureConsoleMessage = async (message: ConsoleMessage): Promise<RawConsol
       value: await readConsoleArgument(handle),
     })),
   );
-  const renderedText = message.text().slice(0, MAX_CONSOLE_VALUE_LENGTH);
-  if (renderedText.length > 0) {
+  if (renderedText !== undefined && renderedText.length > 0) {
     materials.push({
       location: "console.text",
       value: renderedText,
@@ -148,8 +156,16 @@ const captureConsoleMessage = async (message: ConsoleMessage): Promise<RawConsol
     argumentCount: handles.length,
     pageUrl: message.page()?.url(),
     sourceUrl: location.url || undefined,
-    timestamp: message.timestamp(),
+    timestamp,
   };
+};
+
+const snapshotRenderedText = (message: ConsoleMessage): string | undefined => {
+  try {
+    return message.text().slice(0, MAX_CONSOLE_VALUE_LENGTH);
+  } catch {
+    return undefined;
+  }
 };
 
 export class ConsoleObserver {
@@ -158,16 +174,21 @@ export class ConsoleObserver {
   #context: BrowserContext | undefined;
   readonly #listener: (message: ConsoleMessage) => void;
 
-  constructor(private readonly registry: SinkRunRegistry) {
+  constructor(
+    private readonly registry: ConsoleSinkConsumer,
+    private readonly now: (message?: ConsoleMessage) => number = Date.now,
+  ) {
     this.#listener = (message) => {
       if (this.#accepted >= MAX_CONSOLE_SINKS_PER_TEST) {
         this.registry.markLimitReached("console");
         return;
       }
       this.#accepted += 1;
+      const timestamp = this.now(message);
+      const renderedText = snapshotRenderedText(message);
       let operation: Promise<void>;
-      operation = captureConsoleMessage(message)
-        .then((sink) => this.registry.addConsole(sink))
+      operation = captureConsoleMessage(message, timestamp, renderedText)
+        .then((sink) => this.registry.addConsole(sink, message))
         .catch(() => {
           // Handles may be destroyed by navigation before serialization completes.
         })

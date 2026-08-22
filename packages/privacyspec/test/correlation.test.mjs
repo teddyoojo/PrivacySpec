@@ -162,6 +162,86 @@ test("Base64 matching uses the UTF-8 representation for Unicode values", () => {
   assert.equal(result.flows[0]?.transform, "BASE64");
 });
 
+test("Base64 container matching is stable across encoded JSON byte alignment", () => {
+  const raw = ["container.user", "fixture.example"].join("@");
+  const results = [0, 1, 2].map((padding) =>
+    correlate({
+      sources: [source(raw)],
+      sinks: [
+        {
+          kind: "storage",
+          storageType: "cookie",
+          key: `auth-${padding}`,
+          value: Buffer.from(
+            JSON.stringify({ padding: "x".repeat(padding), profile: { email: raw } }),
+          ).toString("base64"),
+          pageUrl: "https://app.example.test/",
+          observedBy: "snapshot",
+          timestamp: 2,
+        },
+      ],
+    }),
+  );
+
+  assert.deepEqual(
+    results.map((result) => result.flows.map((flow) => flow.transform)),
+    [["BASE64"], ["BASE64"], ["BASE64"]],
+  );
+});
+
+test("ambient cookie propagation collapses asset fan-out before reporting", () => {
+  const raw = ["response.user", "fixture.example"].join("@");
+  const encodedProfile = Buffer.from(JSON.stringify({ profile: { email: raw } })).toString(
+    "base64",
+  );
+  const responseSource = {
+    kind: "response-json",
+    raw,
+    category: "personal.email",
+    confidence: "high",
+    evidence: [{ kind: "json-key", value: "email" }],
+    provenance: {
+      origin: "https://app.example.test",
+      endpoint: "/api/profile",
+      location: "json.profile.email",
+    },
+    timestamp: 1,
+    observedBy: "response",
+  };
+  const asset = (endpoint) =>
+    network({
+      url: `https://app.example.test${endpoint}`,
+      method: "GET",
+      resourceType: "script",
+      headers: { cookie: `auth_token=${encodedProfile}` },
+      materials: [{ location: "header.cookie.auth_token", value: encodedProfile }],
+      timestamp: 2,
+    });
+
+  const result = correlate({
+    sources: [responseSource],
+    sinks: [asset("/assets/one.js"), asset("/assets/two.js"), asset("/assets/three.js")],
+  });
+
+  assert.equal(result.flows.length, 1);
+  assert.deepEqual(result.flows[0], {
+    kind: "data-flow",
+    dataCategory: "personal.email",
+    sourceKind: "response-json",
+    sourceConfidence: "high",
+    sourceProvenance: responseSource.provenance,
+    sinkKind: "request-header",
+    recipient: {
+      origin: "https://app.example.test",
+      host: "app.example.test",
+      firstParty: true,
+    },
+    location: "header.cookie.auth_token",
+    transform: "BASE64",
+    test: TEST_METADATA,
+  });
+});
+
 test("mixed-case email values correlate through lowercase and uppercase variants", () => {
   const raw = ["Case.Sensitive", "Example.Test"].join("@");
   const result = correlate({
@@ -365,7 +445,7 @@ test("unrelated and semantically unsupported case variants do not correlate", ()
   assert.deepEqual(result, { flows: [], limitReached: false });
 });
 
-test("event sources do not correlate to earlier sinks while fallback samples remain eligible", () => {
+test("control sources correlate across the isolated test regardless of delivery order", () => {
   const raw = ["temporal.user", "fixture.example"].join("@");
   const earlierSink = network({
     timestamp: 9,
@@ -388,7 +468,7 @@ test("event sources do not correlate to earlier sinks while fallback samples rem
 
   assert.deepEqual(
     eventResult.flows.map((flow) => flow.location),
-    ["json.later"],
+    ["json.earlier", "json.later"],
   );
   assert.deepEqual(
     fallbackResult.flows.map((flow) => flow.location),
@@ -412,6 +492,7 @@ test("path normalization emits stable tokens for common dynamic identifiers", ()
     "/api/customer/:uuid",
   );
   assert.equal(normalizePath("/api/customer/0123456789abcdef01234567", []), "/api/customer/:id");
+  assert.equal(normalizePath("/api/discussions/Td_vr2mldQB0a2vOshEZ3", []), "/api/discussions/:id");
   assert.equal(normalizePath("/api/customer/customer-slug", []), "/api/customer/customer-slug");
 });
 

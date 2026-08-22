@@ -31,7 +31,7 @@ const flow = (overrides = {}) => ({
 
 const ruleIds = (flows, config) => evaluateDataFlows(flows, config).map(({ ruleId }) => ruleId);
 
-test("the rule registry exposes exactly the six stable technical rule IDs", () => {
+test("the Phase 7 registry exposes exactly the six stable technical rule IDs", () => {
   assert.deepEqual(Object.keys(RULE_DEFINITIONS), [
     "PS1001",
     "PS1002",

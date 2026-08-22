@@ -1,16 +1,33 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import {
+  readDependencyBaselineFile,
+  writeDependencyLatestRunFile,
+} from "../dist/analyzers/dependency/artifact.js";
+import { createDependencySemanticKey } from "../dist/analyzers/dependency/baseline.js";
+import { createRuntimeFailureKey } from "../dist/analyzers/runtime-failure/analyzer.js";
+import {
+  readRuntimeFailureBaselineFile,
+  writeRuntimeFailureLatestRunFile,
+} from "../dist/analyzers/runtime-failure/artifact.js";
+import { createSecurityTargetKey } from "../dist/analyzers/security/analyzer.js";
+import {
+  readSecurityBaselineFile,
+  writeSecurityLatestRunFile,
+} from "../dist/analyzers/security/artifact.js";
 import { createBaselineKey } from "../dist/baseline/compare.js";
 import { DEFAULT_BASELINE_PATH, DEFAULT_LATEST_RUN_PATH } from "../dist/baseline/schema.js";
 import { readBaselineFile, writeLatestRunFile } from "../dist/baseline/write.js";
 import { runCli } from "../dist/cli/run.js";
+import { writePrivacySpecReport } from "../dist/report/json.js";
+import { createPrivacySpecReport, DEFAULT_REPORT_PATH } from "../dist/report/model.js";
 
 const execFileAsync = promisify(execFile);
 const packageDirectory = fileURLToPath(new URL("..", import.meta.url));
@@ -26,12 +43,100 @@ const identity = {
   transform: "EXACT",
 };
 const candidate = { key: createBaselineKey(identity), ...identity };
+const dependencyCandidate = {
+  key: createDependencySemanticKey("script", "cdn.vendor.test"),
+  boundary: "external",
+  category: "script",
+  host: "cdn.vendor.test",
+};
+const securityCandidate = {
+  key: createSecurityTargetKey({
+    host: "app.example.test",
+    endpoint: "/dashboard",
+    responseKind: "document",
+    method: "GET",
+  }),
+  host: "app.example.test",
+  endpoint: "/dashboard",
+  responseKind: "document",
+  method: "GET",
+  fingerprints: [
+    {
+      transport: "secure",
+      csp: "present:sha256:1234567890abcdef",
+      hsts: "max-age=31536000;includeSubDomains=true;preload=false",
+      xContentTypeOptions: "nosniff",
+      cors: "origin=none;credentials=none;methods=none",
+      cookies: [],
+    },
+  ],
+  status: "accepted",
+};
+const runtimeFailureCandidate = {
+  key: createRuntimeFailureKey({
+    failureType: "http-5xx",
+    details: {
+      boundary: "first-party",
+      host: "app.example.test",
+      method: "GET",
+      endpoint: "/api/recommendations/:number",
+      httpStatus: 503,
+      errorName: null,
+      signature: null,
+      failureCode: null,
+    },
+  }),
+  failureType: "http-5xx",
+  severity: "ERROR",
+  summary: "First-party HTTP 503",
+  boundary: "first-party",
+  host: "app.example.test",
+  method: "GET",
+  endpoint: "/api/recommendations/:number",
+  httpStatus: 503,
+  errorName: null,
+  signature: null,
+  failureCode: null,
+  status: "accepted",
+};
 
 const temporaryDirectory = async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "privacyspec-cli-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
   return directory;
 };
+
+const emptyReport = ({ complete = true, testDataObservations = [] } = {}) =>
+  createPrivacySpecReport({
+    generatedAt: "2026-08-20T12:00:00.000Z",
+    startedAt: "2026-08-20T11:59:59.000Z",
+    playwrightStatus: complete ? "passed" : "failed",
+    privacyspecStatus: complete ? "passed" : "incomplete",
+    complete,
+    projects: ["chromium"],
+    tests: {
+      total: 1,
+      observed: 1,
+      passed: complete ? 1 : 0,
+      failed: complete ? 0 : 1,
+      timedOut: 0,
+      skipped: 0,
+      interrupted: 0,
+    },
+    sourceCounts: new Map(),
+    sinkCounts: new Map(),
+    suiteDurationMilliseconds: 100,
+    cumulativeTestDurationMilliseconds: 50,
+    flows: [],
+    findings: [],
+    comparison: { observed: [], known: [], new: [], resolved: [] },
+    baselineExists: false,
+    diagnostics: [],
+    integrationErrors: [],
+    ruleMappings: [],
+    profileMappings: [],
+    testDataObservations,
+  });
 
 const invoke = async (args, { cwd, env = {}, interactive = false, confirm } = {}) => {
   const stdout = [];
@@ -68,6 +173,10 @@ test("package exposes a working privacyspec binary", async () => {
   });
   assert.match(stdout, /privacyspec explain <rule-id>/u);
   assert.match(stdout, /privacyspec baseline show/u);
+  assert.match(stdout, /privacyspec inventory/u);
+  assert.match(stdout, /privacyspec testdata/u);
+  assert.match(stdout, /privacyspec testdata scan <path\.\.\.>/u);
+  assert.match(stdout, /privacyspec evidence/u);
   assert.equal(stderr, "");
 
   const explanation = await execFileAsync(process.execPath, [cliEntry, "explain", "PS1001"], {
@@ -75,6 +184,279 @@ test("package exposes a working privacyspec binary", async () => {
   });
   assert.match(explanation.stdout, /PrivacySpec PS1001: Personal data or secret in URL/u);
   assert.equal(explanation.stderr, "");
+});
+
+test("testdata scan supports every format and private atomic output", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const statePath = join(cwd, "auth-state.json");
+  const rawCredential = ["phase18", "runtime", "credential"].join("-");
+  await writeFile(
+    statePath,
+    JSON.stringify({
+      cookies: [
+        {
+          name: ["session", "token"].join("_"),
+          value: rawCredential,
+          domain: "app.example.test",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax",
+        },
+      ],
+      origins: [],
+    }),
+    "utf8",
+  );
+
+  for (const testCase of [
+    { args: ["testdata", "scan", "auth-state.json"], pattern: /Storage-State Hygiene Scan/u },
+    {
+      args: ["testdata", "scan", "auth-state.json", "--format", "json"],
+      pattern: /"storageStateScanSchemaVersion": 1/u,
+    },
+    {
+      args: ["testdata", "scan", "auth-state.json", "--format", "markdown"],
+      pattern: /# PrivacySpec Storage-State Hygiene Scan/u,
+    },
+  ]) {
+    const result = await invoke(testCase.args, { cwd });
+    assert.equal(result.exitCode, 0, testCase.args.join(" "));
+    assert.equal(result.stderr, "", testCase.args.join(" "));
+    assert.match(result.stdout, testCase.pattern, testCase.args.join(" "));
+    assert.doesNotMatch(result.stdout, new RegExp(rawCredential, "u"));
+    assert.doesNotMatch(result.stdout, /session_token|app\.example\.test|auth-state\.json/u);
+  }
+
+  const written = await invoke(
+    [
+      "testdata",
+      "scan",
+      "auth-state.json",
+      "--format",
+      "markdown",
+      "--output",
+      "nested/storage-state.md",
+    ],
+    { cwd },
+  );
+  assert.equal(written.exitCode, 0);
+  assert.equal(written.stderr, "");
+  const outputPath = join(cwd, "nested", "storage-state.md");
+  assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
+  assert.doesNotMatch(await readFile(outputPath, "utf8"), new RegExp(rawCredential, "u"));
+});
+
+test("inventory reads the default report and supports every stdout format", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  await writePrivacySpecReport(join(cwd, DEFAULT_REPORT_PATH), emptyReport());
+
+  const expected = [
+    { args: ["inventory"], pattern: /Runtime Privacy Inventory/u },
+    { args: ["inventory", "--format", "json"], pattern: /"inventorySchemaVersion": 1/u },
+    { args: ["inventory", "--format", "csv"], pattern: /recordType,sourceRun/u },
+    {
+      args: ["inventory", "--format", "markdown"],
+      pattern: /# PrivacySpec Runtime Privacy Inventory/u,
+    },
+  ];
+  for (const testCase of expected) {
+    const result = await invoke(testCase.args, { cwd });
+    assert.equal(result.exitCode, 0, testCase.args.join(" "));
+    assert.equal(result.stderr, "", testCase.args.join(" "));
+    assert.match(result.stdout, testCase.pattern, testCase.args.join(" "));
+  }
+});
+
+test("inventory writes atomic private output and marks incomplete reports", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const reportPath = join(cwd, "source.json");
+  const outputPath = join(cwd, "nested", "inventory.md");
+  await writePrivacySpecReport(reportPath, emptyReport({ complete: false }));
+
+  const result = await invoke(
+    [
+      "inventory",
+      "--report",
+      "source.json",
+      "--format",
+      "markdown",
+      "--output",
+      "nested/inventory.md",
+    ],
+    { cwd },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /inventory written/u);
+  assert.equal(result.stderr, "");
+  assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
+  assert.match(await readFile(outputPath, "utf8"), /\*\*INCOMPLETE\*\*/u);
+});
+
+test("inventory rejects missing, malformed, and unsupported source reports", async (context) => {
+  const cwd = await temporaryDirectory(context);
+
+  const missing = await invoke(["inventory"], { cwd });
+  assert.equal(missing.exitCode, 1);
+  assert.match(missing.stderr, /No PrivacySpec JSON report/u);
+
+  await writeFile(join(cwd, DEFAULT_REPORT_PATH), "not-json", "utf8");
+  const malformed = await invoke(["inventory"], { cwd });
+  assert.equal(malformed.exitCode, 1);
+  assert.match(malformed.stderr, /not valid JSON/u);
+
+  await writeFile(
+    join(cwd, DEFAULT_REPORT_PATH),
+    JSON.stringify({ ...emptyReport(), schemaVersion: 5 }),
+    "utf8",
+  );
+  const unsupported = await invoke(["inventory"], { cwd });
+  assert.equal(unsupported.exitCode, 1);
+  assert.match(unsupported.stderr, /unsupported PrivacySpec JSON report schema/u);
+});
+
+test("testdata reads schema-v2 reports and supports every stdout format", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const observation = {
+    verdict: "REVIEW_REQUIRED",
+    signal: "EMAIL_DOMAIN_NOT_RECOGNIZED_AS_SYNTHETIC",
+    category: "personal.email",
+    sourceKind: "form-input",
+    attribution: {
+      test: {
+        file: "tests/customer.spec.ts",
+        title: "customer can be created",
+        project: "chromium",
+      },
+      control: { elementKind: "input", observedBy: "event" },
+    },
+  };
+  await writePrivacySpecReport(
+    join(cwd, DEFAULT_REPORT_PATH),
+    emptyReport({ testDataObservations: [observation] }),
+  );
+
+  for (const testCase of [
+    { args: ["testdata"], pattern: /PrivacySpec Test-Data Hygiene/u },
+    { args: ["testdata", "--format", "json"], pattern: /"testDataSchemaVersion": 1/u },
+    {
+      args: ["testdata", "--format", "markdown"],
+      pattern: /# PrivacySpec Test-Data Hygiene/u,
+    },
+  ]) {
+    const result = await invoke(testCase.args, { cwd });
+    assert.equal(result.exitCode, 0, testCase.args.join(" "));
+    assert.equal(result.stderr, "", testCase.args.join(" "));
+    assert.match(result.stdout, testCase.pattern, testCase.args.join(" "));
+    assert.doesNotMatch(result.stdout, /phase16-corporate\.dev|review@/u);
+  }
+});
+
+test("testdata writes private output and marks incomplete or legacy reports", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const reportPath = join(cwd, "source.json");
+  const outputPath = join(cwd, "nested", "testdata.md");
+  await writePrivacySpecReport(reportPath, emptyReport({ complete: false }));
+  const written = await invoke(
+    [
+      "testdata",
+      "--report",
+      "source.json",
+      "--format",
+      "markdown",
+      "--output",
+      "nested/testdata.md",
+    ],
+    { cwd },
+  );
+  assert.equal(written.exitCode, 0);
+  assert.match(written.stdout, /test-data hygiene written/u);
+  assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
+  assert.match(await readFile(outputPath, "utf8"), /\*\*INCOMPLETE\*\*/u);
+
+  const {
+    analysis: _analysis,
+    coverage: _coverage,
+    testData: _testData,
+    ...common
+  } = emptyReport();
+  await writeFile(reportPath, `${JSON.stringify({ ...common, schemaVersion: 1 })}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  const legacy = await invoke(["testdata", "--report", "source.json"], { cwd });
+  assert.equal(legacy.exitCode, 0);
+  assert.match(legacy.stdout, /Hygiene data: UNAVAILABLE/u);
+  assert.match(legacy.stdout, /absence is inconclusive/u);
+});
+
+test("evidence supports Markdown and JSON with only explicit build identifiers", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  await writePrivacySpecReport(join(cwd, DEFAULT_REPORT_PATH), emptyReport());
+
+  const markdown = await invoke(["evidence"], { cwd });
+  assert.equal(markdown.exitCode, 0);
+  assert.equal(markdown.stderr, "");
+  assert.match(markdown.stdout, /# PrivacySpec Audit-Supporting Technical Evidence/u);
+  assert.match(markdown.stdout, /AUDIT-SUPPORTING TECHNICAL EVIDENCE/u);
+  assert.match(markdown.stdout, /Commit: not supplied/u);
+  assert.match(markdown.stdout, /Build ID: not supplied/u);
+
+  const json = await invoke(
+    ["evidence", "--format", "json", "--commit", "6d7a6b0", "--build-id", "ci-1701"],
+    { cwd },
+  );
+  assert.equal(json.exitCode, 0);
+  assert.equal(json.stderr, "");
+  const parsed = JSON.parse(json.stdout);
+  assert.equal(parsed.evidenceSchemaVersion, 1);
+  assert.equal(parsed.evidenceKind, "AUDIT_SUPPORTING_TECHNICAL_EVIDENCE");
+  assert.deepEqual(parsed.build, { commit: "6d7a6b0", buildId: "ci-1701" });
+  assert.equal(parsed.execution.sourceRunState, "COMPLETE");
+  assert.doesNotMatch(
+    json.stdout,
+    /\baudit[- ]ready\b|\bcertified\b|\bnon[- ]?compliant\b|\bcompliant\b/iu,
+  );
+});
+
+test("evidence writes private output and makes incomplete scope prominent", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const reportPath = join(cwd, "source.json");
+  const outputPath = join(cwd, "nested", "evidence.md");
+  await writePrivacySpecReport(reportPath, emptyReport({ complete: false }));
+
+  const result = await invoke(
+    [
+      "evidence",
+      "--report",
+      "source.json",
+      "--format",
+      "markdown",
+      "--output",
+      "nested/evidence.md",
+    ],
+    { cwd },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stderr, "");
+  assert.match(result.stdout, /evidence written/u);
+  assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
+  const output = await readFile(outputPath, "utf8");
+  assert.match(output, /\*\*INCOMPLETE SOURCE RUN/u);
+  assert.match(output, /resolved inconclusive/u);
+  assert.doesNotMatch(output, /\b\d+ resolved\b/u);
+});
+
+test("evidence rejects unsafe identifiers without echoing their values", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const unsafe = "private.person@example.test";
+  const result = await invoke(["evidence", "--build-id", unsafe], { cwd });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /evidence build ID is invalid/u);
+  assert.match(result.stderr, /Usage:/u);
+  assert.doesNotMatch(result.stderr, new RegExp(unsafe.replaceAll(".", "\\."), "u"));
 });
 
 test("explain prints the observation, technical control, EU relevance, and limitations", async () => {
@@ -128,7 +510,7 @@ test("explain preserves contextual wording for external transfer and browser sto
   assert.match(storage.stdout, /has no session- or API-token classifier/u);
 });
 
-test("explain supports every rule mapping", async () => {
+test("explain supports every Phase 9 rule mapping", async () => {
   for (const ruleId of ["PS1001", "PS1002", "PS1003", "PS1004", "PS1005", "PS1006"]) {
     const result = await invoke(["explain", ruleId]);
     assert.equal(result.exitCode, 0, ruleId);
@@ -235,6 +617,116 @@ test("non-interactive updates require --yes", async (context) => {
   assert.equal(await readBaselineFile(join(cwd, DEFAULT_BASELINE_PATH)), undefined);
 });
 
+test("dependency baseline module reuses the guarded acceptance lifecycle", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const latestPath = join(cwd, "artifacts", "dependencies.json");
+  const baselinePath = join(cwd, "config", "dependencies.json");
+  await writeDependencyLatestRunFile(latestPath, [dependencyCandidate], {
+    complete: true,
+    createdAt: "2026-08-21T12:00:00.000Z",
+  });
+
+  const update = await invoke(
+    [
+      "baseline",
+      "update",
+      "--module",
+      "dependencies",
+      "--report",
+      "artifacts/dependencies.json",
+      "--baseline",
+      "config/dependencies.json",
+      "--yes",
+    ],
+    { cwd },
+  );
+  assert.equal(update.exitCode, 0);
+  assert.match(update.stdout, /dependency baseline updated/u);
+  assert.equal((await readDependencyBaselineFile(baselinePath))?.dependencies.length, 1);
+
+  const show = await invoke(
+    ["baseline", "show", "--module", "dependencies", "--baseline", "config/dependencies.json"],
+    { cwd },
+  );
+  assert.equal(show.exitCode, 0);
+  assert.match(show.stdout, /dependency baseline: 1 accepted semantic dependency/u);
+  assert.match(show.stdout, /script -> cdn\.vendor\.test/u);
+  assert.match(show.stdout, /dependency:external-script\|cdn\.vendor\.test/u);
+});
+
+test("security baseline module reuses the guarded acceptance lifecycle", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const latestPath = join(cwd, "artifacts", "security.json");
+  const baselinePath = join(cwd, "config", "security.json");
+  await writeSecurityLatestRunFile(latestPath, [securityCandidate], {
+    complete: true,
+    createdAt: "2026-08-21T12:00:00.000Z",
+  });
+
+  const update = await invoke(
+    [
+      "baseline",
+      "update",
+      "--module",
+      "security",
+      "--report",
+      "artifacts/security.json",
+      "--baseline",
+      "config/security.json",
+      "--yes",
+    ],
+    { cwd },
+  );
+  assert.equal(update.exitCode, 0);
+  assert.match(update.stdout, /security posture baseline updated/u);
+  assert.equal((await readSecurityBaselineFile(baselinePath))?.entries.length, 1);
+
+  const show = await invoke(
+    ["baseline", "show", "--module", "security", "--baseline", "config/security.json"],
+    { cwd },
+  );
+  assert.equal(show.exitCode, 0);
+  assert.match(show.stdout, /security posture baseline: 1 accepted target/u);
+  assert.match(show.stdout, /document GET app\.example\.test\/dashboard/u);
+});
+
+test("runtime baseline module accepts known failures without raw diagnostics", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const latestPath = join(cwd, "artifacts", "runtime.json");
+  const baselinePath = join(cwd, "config", "runtime.json");
+  await writeRuntimeFailureLatestRunFile(latestPath, [runtimeFailureCandidate], {
+    complete: true,
+    createdAt: "2026-08-21T12:00:00.000Z",
+  });
+
+  const update = await invoke(
+    [
+      "baseline",
+      "update",
+      "--module",
+      "runtime",
+      "--report",
+      "artifacts/runtime.json",
+      "--baseline",
+      "config/runtime.json",
+      "--yes",
+    ],
+    { cwd },
+  );
+  assert.equal(update.exitCode, 0);
+  assert.match(update.stdout, /runtime failure baseline updated/u);
+  assert.equal((await readRuntimeFailureBaselineFile(baselinePath))?.entries.length, 1);
+
+  const show = await invoke(
+    ["baseline", "show", "--module", "runtime", "--baseline", "config/runtime.json"],
+    { cwd },
+  );
+  assert.equal(show.exitCode, 0);
+  assert.match(show.stdout, /runtime failure baseline: 1 accepted failure identity/u);
+  assert.match(show.stdout, /ERROR http-5xx/u);
+  assert.doesNotMatch(show.stdout, /person@example\.test/u);
+});
+
 test("interactive updates require affirmative confirmation", async (context) => {
   const cwd = await temporaryDirectory(context);
   await writeLatestRunFile(join(cwd, DEFAULT_LATEST_RUN_PATH), [candidate], {
@@ -284,6 +776,14 @@ test("CLI rejects unknown, duplicate, and missing-value flags", async (context) 
     { args: ["baseline", "show", "--unknown"], message: /Unexpected argument/u },
     { args: ["baseline", "show", "--report", "run.json"], message: /Unexpected argument/u },
     { args: ["baseline", "show", "--yes"], message: /Unexpected argument/u },
+    {
+      args: ["baseline", "show", "--module", "posture"],
+      message: /Unsupported baseline module/u,
+    },
+    {
+      args: ["baseline", "show", "--module", "privacy", "--module", "dependencies"],
+      message: /only once/u,
+    },
     { args: ["baseline", "show", "--baseline"], message: /requires a path value/u },
     {
       args: ["baseline", "show", "--baseline", "one.json", "--baseline", "two.json"],
@@ -296,6 +796,81 @@ test("CLI rejects unknown, duplicate, and missing-value flags", async (context) 
     },
     { args: ["baseline", "update", "--yes", "--yes"], message: /only once/u },
     { args: ["baseline", "update", "extra"], message: /Unexpected argument/u },
+    { args: ["inventory", "--report"], message: /requires a path value/u },
+    {
+      args: ["inventory", "--report", "one.json", "--report", "two.json"],
+      message: /only once/u,
+    },
+    { args: ["inventory", "--format", "xml"], message: /Unsupported inventory format/u },
+    { args: ["inventory", "--format"], message: /requires a format value/u },
+    { args: ["inventory", "--format", "json", "--format", "csv"], message: /only once/u },
+    { args: ["inventory", "--output"], message: /requires a path value/u },
+    { args: ["inventory", "--unknown"], message: /Unexpected argument/u },
+    {
+      args: ["inventory", "--report", "same.json", "--output", "same.json"],
+      message: /must not overwrite/u,
+    },
+    { args: ["testdata", "--report"], message: /requires a path value/u },
+    {
+      args: ["testdata", "--report", "one.json", "--report", "two.json"],
+      message: /only once/u,
+    },
+    { args: ["testdata", "--format", "csv"], message: /Unsupported testdata format/u },
+    { args: ["testdata", "--format"], message: /requires a format value/u },
+    { args: ["testdata", "--format", "json", "--format", "markdown"], message: /only once/u },
+    { args: ["testdata", "--output"], message: /requires a path value/u },
+    { args: ["testdata", "--unknown"], message: /Unexpected argument/u },
+    {
+      args: ["testdata", "--report", "same.json", "--output", "same.json"],
+      message: /must not overwrite/u,
+    },
+    { args: ["testdata", "scan"], message: /requires at least one/u },
+    { args: ["testdata", "scan", "state.json", "--format"], message: /requires a format/u },
+    {
+      args: ["testdata", "scan", "state.json", "--format", "csv"],
+      message: /Unsupported testdata scan format/u,
+    },
+    {
+      args: ["testdata", "scan", "state.json", "--format", "json", "--format", "markdown"],
+      message: /only once/u,
+    },
+    { args: ["testdata", "scan", "state.json", "--output"], message: /requires a path/u },
+    { args: ["testdata", "scan", "state.json", "--unknown"], message: /Unexpected argument/u },
+    {
+      args: ["testdata", "scan", "state.json", "state.json"],
+      message: /only once/u,
+    },
+    {
+      args: ["testdata", "scan", "state.json", "--output", "state.json"],
+      message: /must not overwrite/u,
+    },
+    { args: ["evidence", "--report"], message: /requires a path value/u },
+    {
+      args: ["evidence", "--report", "one.json", "--report", "two.json"],
+      message: /only once/u,
+    },
+    { args: ["evidence", "--format", "csv"], message: /Unsupported evidence format/u },
+    { args: ["evidence", "--format"], message: /requires a format value/u },
+    {
+      args: ["evidence", "--format", "json", "--format", "markdown"],
+      message: /only once/u,
+    },
+    { args: ["evidence", "--output"], message: /requires a path value/u },
+    { args: ["evidence", "--unknown"], message: /Unexpected argument/u },
+    {
+      args: ["evidence", "--report", "same.json", "--output", "same.json"],
+      message: /must not overwrite/u,
+    },
+    { args: ["evidence", "--commit"], message: /requires a build identifier value/u },
+    {
+      args: ["evidence", "--commit", "abc", "--commit", "def"],
+      message: /only once/u,
+    },
+    { args: ["evidence", "--build-id"], message: /requires a build identifier value/u },
+    {
+      args: ["evidence", "--build-id", "one", "--build-id", "two"],
+      message: /only once/u,
+    },
   ];
 
   for (const testCase of cases) {

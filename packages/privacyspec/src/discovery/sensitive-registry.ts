@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { classifySensitiveControl } from "./classify-control.js";
-import type { RawSensitiveSource, SourceControlMetadata } from "./source-model.js";
+import type {
+  RawControlSensitiveSource,
+  RawResponseSensitiveSource,
+  RawSensitiveSource,
+  SourceControlMetadata,
+} from "./source-model.js";
 
 export const MAX_SENSITIVE_SOURCES_PER_TEST = 500;
 
@@ -12,13 +17,17 @@ export interface SensitiveSourceStreamEvent {
   version: 1;
   token: string;
   kind: "source" | "limit-reached";
-  source?: RawSensitiveSource | undefined;
+  source?: RawControlSensitiveSource | undefined;
 }
 
 export interface SensitiveRegistrySnapshot {
   sources: RawSensitiveSource[];
   limitReached: boolean;
 }
+
+export type ParsedSensitiveSourceStreamEvent =
+  | { kind: "source"; source: RawControlSensitiveSource }
+  | { kind: "limit-reached" };
 
 const elementKinds = new Set<SourceControlMetadata["elementKind"]>([
   "input",
@@ -69,7 +78,7 @@ const parseControl = (value: unknown): SourceControlMetadata | undefined => {
   return control;
 };
 
-const parseRawSource = (value: unknown): RawSensitiveSource | undefined => {
+export const parseRawControlSource = (value: unknown): RawControlSensitiveSource | undefined => {
   if (!isRecord(value)) return undefined;
 
   const raw = readBoundedString(value, "raw", MAX_RAW_VALUE_LENGTH, true);
@@ -96,6 +105,7 @@ const parseRawSource = (value: unknown): RawSensitiveSource | undefined => {
   if (classification === undefined) return undefined;
 
   return {
+    kind: "control",
     raw,
     ...classification,
     control,
@@ -105,15 +115,35 @@ const parseRawSource = (value: unknown): RawSensitiveSource | undefined => {
   };
 };
 
-const cloneSource = (source: RawSensitiveSource): RawSensitiveSource => ({
-  ...source,
-  evidence: source.evidence.map((item) => ({ ...item })),
-  control: { ...source.control },
-});
+export const parseSensitiveSourceStreamEvent = (
+  value: unknown,
+  token: string,
+): ParsedSensitiveSourceStreamEvent | undefined => {
+  if (!isRecord(value) || value.version !== 1 || value.token !== token) return undefined;
+  if (value.kind === "limit-reached") return { kind: "limit-reached" };
+  if (value.kind !== "source") return undefined;
+  const source = parseRawControlSource(value.source);
+  return source === undefined ? undefined : { kind: "source", source };
+};
+
+const cloneSource = (source: RawSensitiveSource): RawSensitiveSource =>
+  source.kind === "response-json"
+    ? {
+        ...source,
+        evidence: source.evidence.map((item) => ({ ...item })),
+        provenance: { ...source.provenance },
+      }
+    : {
+        ...source,
+        evidence: source.evidence.map((item) => ({ ...item })),
+        control: { ...source.control },
+      };
+
+export type SensitiveSourceAddResult = "added" | "duplicate" | "limit-reached";
 
 export class SensitiveValueRegistry {
   readonly #sources: RawSensitiveSource[] = [];
-  readonly #identities = new Set<string>();
+  readonly #identityIndexes = new Map<string, number>();
   #active = true;
   #limitReached = false;
   #streamToken: string = randomUUID();
@@ -122,36 +152,66 @@ export class SensitiveValueRegistry {
     return this.#streamToken;
   }
 
+  hasSources(): boolean {
+    return this.#sources.length > 0;
+  }
+
   recordStreamEvent(value: unknown): void {
-    if (
-      !this.#active ||
-      !isRecord(value) ||
-      value.version !== 1 ||
-      value.token !== this.#streamToken
-    ) {
-      return;
-    }
-    if (value.kind === "limit-reached") {
-      this.#limitReached = true;
-      return;
-    }
-    if (value.kind === "source") this.add(value.source);
+    if (!this.#active) return;
+    const event = parseSensitiveSourceStreamEvent(value, this.#streamToken);
+    if (event?.kind === "limit-reached") this.#limitReached = true;
+    else if (event?.kind === "source") this.#addParsed(event.source);
+  }
+
+  markLimitReached(): void {
+    if (this.#active) this.#limitReached = true;
   }
 
   add(value: unknown): void {
     if (!this.#active) return;
-    const source = parseRawSource(value);
+    const source = parseRawControlSource(value);
     if (source === undefined) return;
 
-    const identity = JSON.stringify([source.category, source.raw]);
-    if (this.#identities.has(identity)) return;
+    this.#addParsed(source);
+  }
+
+  addResponse(source: RawResponseSensitiveSource): SensitiveSourceAddResult {
+    if (!this.#active) return "limit-reached";
+    return this.#addParsed(cloneSource(source) as RawResponseSensitiveSource);
+  }
+
+  #addParsed(source: RawSensitiveSource): SensitiveSourceAddResult {
+    const identity =
+      source.kind === "response-json"
+        ? JSON.stringify([
+            source.category,
+            source.raw,
+            source.kind,
+            source.provenance.origin,
+            source.provenance.endpoint,
+            source.provenance.location,
+          ])
+        : JSON.stringify([source.category, source.raw]);
+    const existingIndex = this.#identityIndexes.get(identity);
+    if (existingIndex !== undefined) {
+      const existing = this.#sources[existingIndex];
+      if (
+        existing?.kind === "response-json" &&
+        source.kind === "response-json" &&
+        source.timestamp < existing.timestamp
+      ) {
+        this.#sources[existingIndex] = cloneSource(source);
+      }
+      return "duplicate";
+    }
     if (this.#sources.length >= MAX_SENSITIVE_SOURCES_PER_TEST) {
       this.#limitReached = true;
-      return;
+      return "limit-reached";
     }
 
-    this.#identities.add(identity);
+    this.#identityIndexes.set(identity, this.#sources.length);
     this.#sources.push(source);
+    return "added";
   }
 
   snapshot(): SensitiveRegistrySnapshot {
@@ -164,7 +224,7 @@ export class SensitiveValueRegistry {
   dispose(): void {
     this.#active = false;
     this.#sources.length = 0;
-    this.#identities.clear();
+    this.#identityIndexes.clear();
     this.#limitReached = false;
     this.#streamToken = "";
   }

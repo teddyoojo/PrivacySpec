@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "@playwright/test";
@@ -118,70 +119,82 @@ test("real Chromium captures event sources and end-of-test fallback without pers
   }
 });
 
-test("streamed sources survive navigation and popup closure without crossing parallel contexts", async () => {
+test("navigation and popup teardown produce one semantic digest across 20 repetitions", async () => {
   const browser = await chromium.launch();
-  const contextA = await browser.newContext();
-  const contextB = await browser.newContext();
-  const registryA = new SensitiveValueRegistry();
-  const registryB = new SensitiveValueRegistry();
-
   const install = async (context, registry) => {
     await context.exposeBinding(SOURCE_STREAM_BINDING, (_source, event) => {
       registry.recordStreamEvent(event);
     });
     await context.addInitScript({ content: createBrowserObserverScript(registry.streamToken) });
   };
+  const digests = new Set();
 
   try {
-    await Promise.all([install(contextA, registryA), install(contextB, registryB)]);
-    const pageA = await contextA.newPage();
-    const pageB = await contextB.newPage();
-    const navigationMarkup = '<input id="email" type="email" autocomplete="email">';
-    const popupMarkup = '<input id="phone" type="tel" autocomplete="tel">';
-    await Promise.all([
-      pageA.goto(`data:text/html,${encodeURIComponent(navigationMarkup)}`),
-      pageB.setContent('<button id="open" onclick="window.open()">Open</button>'),
+    for (let iteration = 0; iteration < 20; iteration += 1) {
+      const contextA = await browser.newContext();
+      const contextB = await browser.newContext();
+      const registryA = new SensitiveValueRegistry();
+      const registryB = new SensitiveValueRegistry();
+      try {
+        await Promise.all([install(contextA, registryA), install(contextB, registryB)]);
+        const pageA = await contextA.newPage();
+        const pageB = await contextB.newPage();
+        const navigationMarkup = '<input id="email" type="email" autocomplete="email">';
+        const popupMarkup = '<input id="phone" type="tel" autocomplete="tel">';
+        await Promise.all([
+          pageA.goto(`data:text/html,${encodeURIComponent(navigationMarkup)}`),
+          pageB.setContent('<button id="open" onclick="window.open()">Open</button>'),
+        ]);
+
+        const popupPromise = pageB.waitForEvent("popup");
+        await pageB.locator("#open").click();
+        const popup = await popupPromise;
+        await popup.goto(`data:text/html,${encodeURIComponent(popupMarkup)}`);
+
+        const email = ["navigation", "example.test"].join("@");
+        const phone = ["+49", "171", "1111111"].join("");
+        await Promise.all([
+          pageA.locator("#email").fill(email),
+          popup.locator("#phone").fill(phone),
+        ]);
+        await Promise.all([pageA.goto("data:text/html,navigated"), popup.close()]);
+        await Promise.all([waitForSource(registryA), waitForSource(registryB)]);
+
+        const snapshotA = registryA.snapshot();
+        const snapshotB = registryB.snapshot();
+        assert.equal(snapshotA.sources.length, 1);
+        assert.equal(snapshotB.sources.length, 1);
+        assert.equal(snapshotA.sources[0]?.category, "personal.email");
+        assert.equal(snapshotB.sources[0]?.category, "personal.phone");
+        assert.equal(snapshotA.sources[0]?.raw === email, true);
+        assert.equal(snapshotB.sources[0]?.raw === phone, true);
+        assert.equal(
+          snapshotA.sources.some((source) => source.raw === phone),
+          false,
+        );
+        assert.equal(
+          snapshotB.sources.some((source) => source.raw === email),
+          false,
+        );
+
+        const serialized = JSON.stringify([
+          ...sanitizeSensitiveSources(snapshotA.sources, snapshotA.limitReached),
+          ...sanitizeSensitiveSources(snapshotB.sources, snapshotB.limitReached),
+        ]);
+        assert.equal(serialized.includes(email), false);
+        assert.equal(serialized.includes(phone), false);
+        digests.add(createHash("sha256").update(serialized).digest("hex"));
+      } finally {
+        registryA.dispose();
+        registryB.dispose();
+        await contextA.close();
+        await contextB.close();
+      }
+    }
+    assert.deepEqual(Array.from(digests), [
+      "c79a98b3c42dcb57df827a56241f20768752941935a4fa4dcb68578e7bdd6408",
     ]);
-
-    const popupPromise = pageB.waitForEvent("popup");
-    await pageB.locator("#open").click();
-    const popup = await popupPromise;
-    await popup.goto(`data:text/html,${encodeURIComponent(popupMarkup)}`);
-
-    const email = ["navigation", "example.test"].join("@");
-    const phone = ["+49", "171", "1111111"].join("");
-    await Promise.all([pageA.locator("#email").fill(email), popup.locator("#phone").fill(phone)]);
-    await Promise.all([pageA.goto("data:text/html,navigated"), popup.close()]);
-    await Promise.all([waitForSource(registryA), waitForSource(registryB)]);
-
-    const snapshotA = registryA.snapshot();
-    const snapshotB = registryB.snapshot();
-    assert.equal(snapshotA.sources.length, 1);
-    assert.equal(snapshotB.sources.length, 1);
-    assert.equal(snapshotA.sources[0]?.category, "personal.email");
-    assert.equal(snapshotB.sources[0]?.category, "personal.phone");
-    assert.equal(snapshotA.sources[0]?.raw === email, true);
-    assert.equal(snapshotB.sources[0]?.raw === phone, true);
-    assert.equal(
-      snapshotA.sources.some((source) => source.raw === phone),
-      false,
-    );
-    assert.equal(
-      snapshotB.sources.some((source) => source.raw === email),
-      false,
-    );
-
-    const serialized = JSON.stringify([
-      ...sanitizeSensitiveSources(snapshotA.sources, snapshotA.limitReached),
-      ...sanitizeSensitiveSources(snapshotB.sources, snapshotB.limitReached),
-    ]);
-    assert.equal(serialized.includes(email), false);
-    assert.equal(serialized.includes(phone), false);
   } finally {
-    registryA.dispose();
-    registryB.dispose();
-    await contextA.close();
-    await contextB.close();
     await browser.close();
   }
 });

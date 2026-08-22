@@ -12,6 +12,11 @@ const TRUNCATED_PATH_SUFFIX = "/:truncated";
 const UUID_PATH_SEGMENT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const NUMERIC_PATH_SEGMENT = /^\d+$/u;
 const LONG_HEX_PATH_SEGMENT = /^[0-9a-f]{16,}$/iu;
+const HIGH_ENTROPY_URL_SAFE_ID = /^(?=.{16,80}$)(?=.*[a-z])(?=.*[A-Z])(?=.*\d)[A-Za-z0-9_-]+$/u;
+const LOWERCASE_OPAQUE_ID = /^(?=.{16,80}$)(?=.*[a-z])(?=.*\d)[a-z0-9]+$/u;
+const PREFIXED_COMPOSITE_INSTANCE_ID =
+  /^(?=.{12,80}$)(?!v\d_)[a-z0-9]{2}_(?:[a-z][a-z0-9]{2,}_)+[a-z][a-z0-9]{2,}$/u;
+const REPRESENTATION_SUFFIX = /^(.*?)(\.[a-z][a-z0-9]{0,9})$/iu;
 
 export const redactSensitive = (
   value: string,
@@ -67,6 +72,8 @@ export const normalizePath = (pathname: string, sensitiveValues: readonly string
         segment = ":number";
       } else if (LONG_HEX_PATH_SEGMENT.test(redactedSegment)) {
         segment = ":id";
+      } else if (HIGH_ENTROPY_URL_SAFE_ID.test(redactedSegment)) {
+        segment = ":id";
       } else {
         segment =
           redactedSegment.length > 80 || looksSensitive(redactedSegment)
@@ -90,3 +97,28 @@ export const normalizePath = (pathname: string, sensitiveValues: readonly string
   }
   return normalized || "/";
 };
+
+const canonicalizeEndpointSegment = (segment: string): string => {
+  if (segment.startsWith(":")) return segment;
+  const suffixMatch = REPRESENTATION_SUFFIX.exec(segment);
+  const core = suffixMatch?.[1] ?? segment;
+  const suffix = suffixMatch?.[2] ?? "";
+  if (LOWERCASE_OPAQUE_ID.test(core) || PREFIXED_COMPOSITE_INSTANCE_ID.test(core)) {
+    return `:id${suffix.toLowerCase()}`;
+  }
+  return segment;
+};
+
+/**
+ * Produces a repository-independent semantic endpoint identity.
+ *
+ * This adds endpoint-only dynamic-segment rules to the privacy-safe path
+ * normalization above. Representation suffixes remain visible so, for
+ * example, an instance document and its JSON endpoint do not become the same
+ * identity. Ordinary static route vocabulary is retained verbatim.
+ */
+export const canonicalizeEndpointPath = (
+  pathname: string,
+  sensitiveValues: readonly string[],
+): string =>
+  normalizePath(pathname, sensitiveValues).split("/").map(canonicalizeEndpointSegment).join("/");

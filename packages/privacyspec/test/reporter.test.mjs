@@ -4,6 +4,31 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import {
+  createDependencyAttachment,
+  DEPENDENCY_ATTACHMENT_CONTENT_TYPE,
+  DEPENDENCY_ATTACHMENT_NAME,
+  readCompleteDependencyLatestRunFile,
+  readDependencyReport,
+  writeDependencyBaselineFile,
+} from "../dist/analyzers/dependency/artifact.js";
+import { createDependencySemanticCandidates } from "../dist/analyzers/dependency/baseline.js";
+import { createRuntimeFailureKey } from "../dist/analyzers/runtime-failure/analyzer.js";
+import {
+  createRuntimeFailureAttachment,
+  RUNTIME_FAILURE_ATTACHMENT_CONTENT_TYPE,
+  RUNTIME_FAILURE_ATTACHMENT_NAME,
+  readCompleteRuntimeFailureLatestRunFile,
+  readRuntimeFailureReport,
+} from "../dist/analyzers/runtime-failure/artifact.js";
+import { createSecurityTargetKey } from "../dist/analyzers/security/analyzer.js";
+import {
+  createSecurityAttachment,
+  readCompleteSecurityLatestRunFile,
+  readSecurityReport,
+  SECURITY_ATTACHMENT_CONTENT_TYPE,
+  SECURITY_ATTACHMENT_NAME,
+} from "../dist/analyzers/security/artifact.js";
 import { createBaselineFlowCandidate } from "../dist/baseline/compare.js";
 import { writeBaselineFile, writeLatestRunFile } from "../dist/baseline/write.js";
 import PrivacySpecReporter from "../dist/playwright/reporter.js";
@@ -12,9 +37,26 @@ import {
   PRIVACYSPEC_ATTACHMENT_CONTENT_TYPE,
   PRIVACYSPEC_ATTACHMENT_NAME,
 } from "../dist/playwright/result.js";
+import { readPrivacySpecReport } from "../dist/report/read.js";
 
 const resultWith = (attachments, status = "passed") => ({ attachments, status });
 const testCase = { title: "ordinary QA test" };
+
+const testDataObservation = (overrides = {}) => ({
+  verdict: "REVIEW_REQUIRED",
+  signal: "EMAIL_DOMAIN_NOT_RECOGNIZED_AS_SYNTHETIC",
+  category: "personal.email",
+  sourceKind: "form-input",
+  attribution: {
+    test: {
+      file: "tests/customer.spec.ts",
+      title: "customer can be created",
+      project: "chromium",
+    },
+    control: { elementKind: "input", observedBy: "event" },
+  },
+  ...overrides,
+});
 
 const reviewFinding = (overrides = {}) => {
   const { flow: flowOverrides = {}, ...findingOverrides } = overrides;
@@ -72,12 +114,60 @@ const personalUrlFinding = () =>
 const attachmentWith = (...observations) => {
   const result = createEmptyPrivacySpecResult();
   result.observations.push(...observations);
-  return {
-    name: PRIVACYSPEC_ATTACHMENT_NAME,
-    contentType: PRIVACYSPEC_ATTACHMENT_CONTENT_TYPE,
-    body: Buffer.from(JSON.stringify(result)),
-  };
+  return attachmentWithResult(result);
 };
+
+const attachmentWithResult = (result) => ({
+  name: PRIVACYSPEC_ATTACHMENT_NAME,
+  contentType: PRIVACYSPEC_ATTACHMENT_CONTENT_TYPE,
+  body: Buffer.from(JSON.stringify(result)),
+});
+
+const dependencyAttachmentWith = (inventory, coverage = "complete", diagnostics = []) => ({
+  name: DEPENDENCY_ATTACHMENT_NAME,
+  contentType: DEPENDENCY_ATTACHMENT_CONTENT_TYPE,
+  body: Buffer.from(
+    JSON.stringify({
+      schemaVersion: 1,
+      analyzerId: "dependency",
+      coverage,
+      inventory,
+      diagnostics,
+    }),
+  ),
+});
+
+const analyzerAttachmentWith = (name, contentType, value) => ({
+  name,
+  contentType,
+  body: Buffer.from(JSON.stringify(value)),
+});
+
+const emptyAnalyzerAttachment = (name, contentType, analyzerId) => ({
+  name,
+  contentType,
+  body: Buffer.from(
+    JSON.stringify({
+      schemaVersion: 1,
+      analyzerId,
+      coverage: "complete",
+      inventory: [],
+      diagnostics: [],
+    }),
+  ),
+});
+
+const dependencyInventoryEntry = (overrides = {}) => ({
+  kind: "runtime-dependency",
+  origin: "https://cdn.vendor.test",
+  host: "cdn.vendor.test",
+  boundary: "external",
+  resourceTypes: ["script"],
+  requestMethods: ["GET"],
+  firstSeenTests: [{ file: "tests/checkout.spec.ts", project: "chromium" }],
+  occurrenceCount: 2,
+  ...overrides,
+});
 
 test("reporter reads exactly one sanitized PrivacySpec result", async () => {
   const output = [];
@@ -96,6 +186,495 @@ test("reporter reads exactly one sanitized PrivacySpec result", async () => {
 
   assert.equal(await reporter.onEnd({ status: "passed" }), undefined);
   assert.deepEqual(output, ["PrivacySpec observed 1 tests\n"]);
+});
+
+test("reporter emits bounded dependency reviews and an independent baseline lifecycle", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "privacyspec-dependency-reporter-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const baselinePath = join(directory, "dependency-baseline.json");
+  const latestRunPath = join(directory, "latest-dependencies.json");
+  const reportPath = join(directory, "dependencies-report.json");
+  const acceptedInventory = [
+    dependencyInventoryEntry(),
+    dependencyInventoryEntry({
+      origin: "https://old.vendor.test",
+      host: "old.vendor.test",
+      resourceTypes: ["font"],
+    }),
+  ];
+  await writeDependencyBaselineFile(
+    baselinePath,
+    createDependencySemanticCandidates(acceptedInventory),
+    { createdAt: "2026-08-21T12:00:00.000Z" },
+  );
+  const output = [];
+  const reporter = new PrivacySpecReporter({
+    baselinePath: false,
+    latestRunPath: false,
+    reportPath: false,
+    dependencies: { baselinePath, latestRunPath, reportPath },
+    write: (message) => output.push(message),
+  });
+  reporter.onBegin({ projects: [{ name: "chromium" }] });
+  reporter.onTestEnd(testCase, {
+    ...resultWith([
+      attachmentWithResult(createEmptyPrivacySpecResult()),
+      dependencyAttachmentWith([
+        dependencyInventoryEntry({
+          origin: "https://api.newvendor.test",
+          host: "api.newvendor.test",
+          resourceTypes: ["fetch/xhr"],
+          requestMethods: ["POST"],
+          occurrenceCount: 1,
+        }),
+        dependencyInventoryEntry(),
+      ]),
+      emptyAnalyzerAttachment(
+        SECURITY_ATTACHMENT_NAME,
+        SECURITY_ATTACHMENT_CONTENT_TYPE,
+        "security",
+      ),
+      emptyAnalyzerAttachment(
+        RUNTIME_FAILURE_ATTACHMENT_NAME,
+        RUNTIME_FAILURE_ATTACHMENT_CONTENT_TYPE,
+        "runtime-failure",
+      ),
+    ]),
+    duration: 25,
+  });
+
+  const endResult = await reporter.onEnd({
+    status: "passed",
+    startTime: new Date("2026-08-21T12:00:00.000Z"),
+    duration: 50,
+  });
+  const rendered = output.join("");
+  assert.equal(endResult, undefined, rendered);
+  assert.match(rendered, /runtime dependencies: origins=2, external=2, requests=3/u);
+  assert.match(rendered, /dependencies\s+REVIEW \(coverage=COMPLETE, changes=2, origins=2\)/u);
+  assert.match(rendered, /NEW_EXTERNAL_ORIGIN https:\/\/api\.newvendor\.test as origin/u);
+  assert.match(rendered, /NEW_EXTERNAL_API https:\/\/api\.newvendor\.test as fetch\/xhr/u);
+  assert.match(rendered, /Secondary coverage: REVIEW/u);
+  assert.match(rendered, /PrivacySpec result: REVIEW/u);
+  assert.doesNotMatch(rendered, /malicious|untrusted|violation|compromise/iu);
+
+  const report = await readDependencyReport(reportPath);
+  assert.equal(report.complete, true);
+  assert.deepEqual(report.baseline, { exists: true, known: 2, new: 2, resolved: 2 });
+  assert.deepEqual(report.findings.map((finding) => finding.ruleId).sort(), [
+    "NEW_EXTERNAL_API",
+    "NEW_EXTERNAL_ORIGIN",
+  ]);
+  assert.equal((await readCompleteDependencyLatestRunFile(latestRunPath)).dependencies.length, 4);
+});
+
+test("reporter suite aggregation writes canonically parseable secondary artifacts", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "privacyspec-canonical-reporter-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const reportPath = join(directory, "privacyspec-report.json");
+  const dependencyReportPath = join(directory, "dependency-report.json");
+  const dependencyLatestRunPath = join(directory, "dependency-latest.json");
+  const securityReportPath = join(directory, "security-report.json");
+  const securityLatestRunPath = join(directory, "security-latest.json");
+  const runtimeReportPath = join(directory, "runtime-report.json");
+  const runtimeLatestRunPath = join(directory, "runtime-latest.json");
+  const reporter = new PrivacySpecReporter({
+    baselinePath: false,
+    latestRunPath: false,
+    reportPath,
+    dependencies: {
+      baselinePath: false,
+      latestRunPath: dependencyLatestRunPath,
+      reportPath: dependencyReportPath,
+    },
+    security: {
+      baselinePath: false,
+      latestRunPath: securityLatestRunPath,
+      reportPath: securityReportPath,
+    },
+    runtimeFailures: {
+      baselinePath: false,
+      latestRunPath: runtimeLatestRunPath,
+      reportPath: runtimeReportPath,
+    },
+    write: () => {},
+  });
+  reporter.onBegin({ projects: [{ name: "chromium" }] });
+
+  const securityKey = createSecurityTargetKey({
+    host: "app.example.test",
+    endpoint: "/assets/app-Ab3F09.js",
+    responseKind: "api",
+    method: "GET",
+  });
+  const runtimeDetails = {
+    boundary: "first-party",
+    host: "app.example.test",
+    method: "GET",
+    endpoint: "/assets/app-Ab3F09.js",
+    httpStatus: null,
+    errorName: null,
+    signature: null,
+    failureCode: "ERR_CONNECTION_RESET",
+  };
+  const runtimeKey = createRuntimeFailureKey({
+    failureType: "request-failed",
+    details: runtimeDetails,
+  });
+  const testReferences = [
+    { file: "tests/routes/%24user.spec.ts", project: "%project" },
+    { file: "tests/routes/.account.spec.ts", project: ".project" },
+  ];
+
+  for (const [index, reference] of testReferences.entries()) {
+    const dependencyAttachment = createDependencyAttachment(
+      {
+        analyzerId: "dependency",
+        coverage: "complete",
+        inventory: [
+          dependencyInventoryEntry({
+            requestMethods: [index === 0 ? "%METHOD" : ".METHOD"],
+            firstSeenTests: [reference],
+            occurrenceCount: 1,
+          }),
+        ],
+        diagnostics: [],
+      },
+      { failed: false },
+    );
+    const securityAttachment = createSecurityAttachment(
+      {
+        analyzerId: "security",
+        coverage: "complete",
+        inventory: [
+          {
+            kind: "security-posture",
+            key: securityKey,
+            host: "app.example.test",
+            endpoint: "/assets/app-Ab3F09.js",
+            responseKind: "api",
+            method: "GET",
+            fingerprints: [
+              {
+                transport: "secure",
+                csp: index === 0 ? "present:sha256:Ab3F09" : "present:sha256:aB3f09",
+                hsts: "max-age=31536000;includeSubDomains=true;preload=false",
+                xContentTypeOptions: "nosniff",
+                cors: "none",
+                cookies: [
+                  {
+                    name: index === 0 ? "%session" : ".session",
+                    secure: true,
+                    httpOnly: true,
+                    sameSite: "lax",
+                  },
+                ],
+              },
+            ],
+            firstSeenTests: [reference],
+            occurrenceCount: 1,
+          },
+        ],
+        diagnostics: [],
+      },
+      { failed: false },
+    );
+    const runtimeAttachment = createRuntimeFailureAttachment(
+      {
+        analyzerId: "runtime-failure",
+        coverage: "complete",
+        inventory: [
+          {
+            kind: "runtime-failure",
+            key: runtimeKey,
+            failureType: "request-failed",
+            severity: "REVIEW",
+            summary: "Network request failed",
+            ...runtimeDetails,
+            firstSeenTests: [reference],
+            occurrenceCount: 1,
+          },
+        ],
+        diagnostics: [],
+      },
+      { failed: false },
+    );
+    reporter.onTestEnd(
+      { title: `ordinary QA test ${index + 1}` },
+      {
+        ...resultWith([
+          attachmentWithResult(createEmptyPrivacySpecResult()),
+          analyzerAttachmentWith(
+            DEPENDENCY_ATTACHMENT_NAME,
+            DEPENDENCY_ATTACHMENT_CONTENT_TYPE,
+            dependencyAttachment,
+          ),
+          analyzerAttachmentWith(
+            SECURITY_ATTACHMENT_NAME,
+            SECURITY_ATTACHMENT_CONTENT_TYPE,
+            securityAttachment,
+          ),
+          analyzerAttachmentWith(
+            RUNTIME_FAILURE_ATTACHMENT_NAME,
+            RUNTIME_FAILURE_ATTACHMENT_CONTENT_TYPE,
+            runtimeAttachment,
+          ),
+        ]),
+        duration: 10,
+      },
+    );
+  }
+
+  assert.equal(
+    await reporter.onEnd({
+      status: "passed",
+      startTime: new Date("2026-08-21T12:00:00.000Z"),
+      duration: 25,
+    }),
+    undefined,
+  );
+
+  const dependencyReport = await readDependencyReport(dependencyReportPath);
+  const securityReport = await readSecurityReport(securityReportPath);
+  const runtimeReport = await readRuntimeFailureReport(runtimeReportPath);
+  const unifiedReport = await readPrivacySpecReport(reportPath);
+  assert.deepEqual(dependencyReport.inventory[0].requestMethods, ["%METHOD", ".METHOD"]);
+  assert.deepEqual(dependencyReport.inventory[0].firstSeenTests, testReferences);
+  assert.deepEqual(
+    securityReport.inventory[0].fingerprints.map((fingerprint) => fingerprint.csp),
+    ["present:sha256:Ab3F09", "present:sha256:aB3f09"],
+  );
+  assert.deepEqual(securityReport.inventory[0].firstSeenTests, testReferences);
+  assert.deepEqual(runtimeReport.inventory[0].firstSeenTests, testReferences);
+  assert.equal(runtimeReport.inventory[0].occurrenceCount, 2);
+  const { status: _dependencyStatus, ...embeddedDependencyReport } =
+    unifiedReport.analysis.dependencies;
+  const { status: _securityStatus, ...embeddedSecurityReport } = unifiedReport.analysis.security;
+  const { status: _runtimeStatus, ...embeddedRuntimeReport } = unifiedReport.analysis.runtimeErrors;
+  assert.deepEqual(embeddedDependencyReport, dependencyReport);
+  assert.deepEqual(embeddedSecurityReport, securityReport);
+  assert.deepEqual(embeddedRuntimeReport, runtimeReport);
+  assert.deepEqual(
+    (await readCompleteDependencyLatestRunFile(dependencyLatestRunPath)).dependencies,
+    dependencyReport.findings.map(({ identity, observedAs, host }) => ({
+      key: identity,
+      boundary: "external",
+      category: observedAs,
+      host,
+    })),
+  );
+  assert.equal((await readCompleteSecurityLatestRunFile(securityLatestRunPath)).entries.length, 1);
+  assert.equal(
+    (await readCompleteRuntimeFailureLatestRunFile(runtimeLatestRunPath)).entries.length,
+    1,
+  );
+});
+
+test("incomplete dependency coverage suppresses resolved conclusions", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "privacyspec-dependency-incomplete-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const baselinePath = join(directory, "dependency-baseline.json");
+  const reportPath = join(directory, "dependencies-report.json");
+  await writeDependencyBaselineFile(
+    baselinePath,
+    createDependencySemanticCandidates([dependencyInventoryEntry()]),
+    { createdAt: "2026-08-21T12:00:00.000Z" },
+  );
+  const output = [];
+  const reporter = new PrivacySpecReporter({
+    baselinePath: false,
+    latestRunPath: false,
+    reportPath: false,
+    dependencies: { baselinePath, latestRunPath: false, reportPath },
+    write: (message) => output.push(message),
+  });
+  reporter.onTestEnd(
+    testCase,
+    resultWith([
+      attachmentWithResult(createEmptyPrivacySpecResult()),
+      dependencyAttachmentWith([], "incomplete", [
+        {
+          code: "DEPENDENCY_ANALYSIS_INCOMPLETE",
+          message: "Runtime dependency analysis did not complete inside the finalization bound.",
+        },
+      ]),
+    ]),
+  );
+
+  assert.equal(await reporter.onEnd({ status: "passed" }), undefined);
+  assert.match(output.join(""), /dependency analysis: INCONCLUSIVE/u);
+  const report = await readDependencyReport(reportPath);
+  assert.equal(report.complete, false);
+  assert.equal(report.baseline.resolved, 0);
+});
+
+test("reporter fails closed when executed tests instrument no application context", async () => {
+  const output = [];
+  const reporter = new PrivacySpecReporter({ write: (message) => output.push(message) });
+  const result = createEmptyPrivacySpecResult();
+  result.coverage.playwright = { applicationContexts: 0, pages: 0 };
+  result.coverage.observation.contexts = { seen: 2, instrumented: 1 };
+  result.coverage.observation.pages = { seen: 1, instrumented: 0, storageCapable: 0 };
+
+  reporter.onTestEnd(testCase, resultWith([attachmentWithResult(result)]));
+
+  assert.deepEqual(await reporter.onEnd({ status: "passed" }), { status: "failed" });
+  assert.match(
+    output.join(""),
+    /COVERAGE_INCOMPATIBLE: 1 Playwright tests ran but no application BrowserContexts were instrumented/u,
+  );
+});
+
+test("reporter accepts attachment v1/v2 and summarizes validated experimental response coverage", async () => {
+  const output = [];
+  const reporter = new PrivacySpecReporter({ write: (message) => output.push(message) });
+  const legacy = {
+    name: PRIVACYSPEC_ATTACHMENT_NAME,
+    contentType: PRIVACYSPEC_ATTACHMENT_CONTENT_TYPE,
+    body: Buffer.from(JSON.stringify({ schemaVersion: 1, observations: [] })),
+  };
+  const current = createEmptyPrivacySpecResult();
+  const previous = structuredClone(current);
+  previous.schemaVersion = 2;
+  delete previous.coverage.observation;
+  current.coverage.firstPartyJsonResponses.enabled = true;
+  current.coverage.firstPartyJsonResponses.responses = {
+    seen: 3,
+    firstParty: 2,
+    json: 2,
+    parsed: 1,
+    withSources: 1,
+  };
+  current.coverage.firstPartyJsonResponses.discoveredSources = {
+    total: 1,
+    byCategory: { "personal.email": 1, "personal.phone": 0 },
+  };
+  current.coverage.firstPartyJsonResponses.skipped.unknownLength = 1;
+  const attachment = {
+    name: PRIVACYSPEC_ATTACHMENT_NAME,
+    contentType: PRIVACYSPEC_ATTACHMENT_CONTENT_TYPE,
+    body: Buffer.from(JSON.stringify(current)),
+  };
+
+  reporter.onTestEnd(testCase, resultWith([legacy]));
+  reporter.onTestEnd(testCase, resultWith([attachmentWithResult(previous)]));
+  reporter.onTestEnd(testCase, resultWith([attachment]));
+  assert.equal(await reporter.onEnd({ status: "passed" }), undefined);
+  assert.match(
+    output.join(""),
+    /experimental JSON response sources: parsed=1, discovered=1, skipped=1/u,
+  );
+});
+
+test("reporter summarizes validated early network filtering coverage", async () => {
+  const output = [];
+  const reporter = new PrivacySpecReporter({ write: (message) => output.push(message) });
+  const current = createEmptyPrivacySpecResult();
+  current.coverage.network.requests = {
+    seen: 12,
+    accepted: 4,
+    filteredLowValueStatic: 8,
+  };
+
+  reporter.onTestEnd(testCase, resultWith([attachmentWithResult(current)]));
+
+  assert.equal(await reporter.onEnd({ status: "passed" }), undefined);
+  assert.match(output.join(""), /network filtering: low-value static requests=8/u);
+});
+
+test("reporter fails closed for malformed network filtering coverage", async () => {
+  const output = [];
+  const reporter = new PrivacySpecReporter({ write: (message) => output.push(message) });
+  const current = createEmptyPrivacySpecResult();
+  current.coverage.network.requests = {
+    seen: 1,
+    accepted: 1,
+    filteredLowValueStatic: 1,
+  };
+
+  reporter.onTestEnd(testCase, resultWith([attachmentWithResult(current)]));
+
+  assert.deepEqual(await reporter.onEnd({ status: "passed" }), { status: "failed" });
+  assert.match(output.join(""), /invalid network observation coverage/u);
+});
+
+test("reporter fails closed for malformed observation coverage counters", async () => {
+  const output = [];
+  const reporter = new PrivacySpecReporter({ write: (message) => output.push(message) });
+  const current = createEmptyPrivacySpecResult();
+  current.coverage.observation.pages = {
+    seen: 1,
+    instrumented: 2,
+    storageCapable: 1,
+  };
+
+  reporter.onTestEnd(testCase, resultWith([attachmentWithResult(current)]));
+
+  assert.deepEqual(await reporter.onEnd({ status: "passed" }), { status: "failed" });
+  assert.match(output.join(""), /invalid observation coverage counters/u);
+});
+
+test("test-data hygiene review remains non-failing and prints only a count and command hint", async () => {
+  const output = [];
+  const reporter = new PrivacySpecReporter({ write: (message) => output.push(message) });
+  const current = createEmptyPrivacySpecResult();
+  current.testData.observations.push(testDataObservation());
+  reporter.onTestEnd(
+    testCase,
+    resultWith([
+      {
+        name: PRIVACYSPEC_ATTACHMENT_NAME,
+        contentType: PRIVACYSPEC_ATTACHMENT_CONTENT_TYPE,
+        body: Buffer.from(JSON.stringify(current)),
+      },
+    ]),
+  );
+
+  assert.equal(await reporter.onEnd({ status: "passed" }), undefined);
+  assert.deepEqual(output, [
+    "PrivacySpec observed 1 tests\n",
+    "PrivacySpec test-data hygiene: 1 review-required observation; inspect with privacyspec testdata\n",
+  ]);
+  assert.doesNotMatch(output.join(""), /EMAIL_DOMAIN|customer\.spec/u);
+});
+
+test("synthetic hygiene stays quiet and malformed hygiene fails as an integration error", async () => {
+  const quietOutput = [];
+  const quietReporter = new PrivacySpecReporter({
+    write: (message) => quietOutput.push(message),
+  });
+  const synthetic = createEmptyPrivacySpecResult();
+  synthetic.testData.observations.push(
+    testDataObservation({
+      verdict: "SYNTHETIC",
+      signal: "IANA_RESERVED_EMAIL_DOMAIN",
+    }),
+  );
+  quietReporter.onTestEnd(testCase, resultWith([attachmentWithResult(synthetic)]));
+  assert.equal(await quietReporter.onEnd({ status: "passed" }), undefined);
+  assert.deepEqual(quietOutput, ["PrivacySpec observed 1 tests\n"]);
+
+  const invalidOutput = [];
+  const invalidReporter = new PrivacySpecReporter({
+    write: (message) => invalidOutput.push(message),
+  });
+  const malformed = createEmptyPrivacySpecResult();
+  malformed.testData.observations.push(
+    testDataObservation({
+      attribution: {
+        test: {
+          file: "tests/customer.spec.ts",
+          title: "forged@example.test",
+          project: "chromium",
+        },
+        control: { elementKind: "input", observedBy: "event" },
+      },
+    }),
+  );
+  invalidReporter.onTestEnd(testCase, resultWith([attachmentWithResult(malformed)]));
+  assert.deepEqual(await invalidReporter.onEnd({ status: "passed" }), { status: "failed" });
+  assert.match(invalidOutput.join(""), /invalid test-data hygiene section/u);
+  assert.doesNotMatch(invalidOutput.join(""), /forged@example/u);
 });
 
 test("reporter emits NIS2 testing-evidence relevance only for the explicit profile", async () => {
@@ -368,6 +947,41 @@ test("reporter deduplicates and prints supported informational limit diagnostics
   ]);
 });
 
+test("reporter treats a namespaced privacy analyzer failure as inconclusive", async () => {
+  const output = [];
+  const reporter = new PrivacySpecReporter({
+    baselinePath: false,
+    latestRunPath: false,
+    reportPath: false,
+    write: (message) => output.push(message),
+  });
+  const result = createEmptyPrivacySpecResult();
+  result.observations.push({
+    kind: "diagnostic",
+    code: "PS_ANALYZER_PRIVACY_FAILED",
+    classification: "informational",
+    message: "The privacy analyzer failed inside the bounded runtime analyzer host.",
+  });
+  reporter.onBegin({ projects: [{ name: "chromium" }] }, { allTests: () => [testCase] });
+  reporter.onTestEnd(testCase, {
+    ...resultWith([attachmentWithResult(result)]),
+    duration: 10,
+  });
+
+  assert.equal(
+    await reporter.onEnd({
+      status: "passed",
+      startTime: new Date("2026-08-21T12:00:00.000Z"),
+      duration: 20,
+    }),
+    undefined,
+  );
+  assert.match(output.join(""), /PS_ANALYZER_PRIVACY_FAILED/u);
+  assert.match(output.join(""), /Observation coverage: INCOMPLETE/u);
+  assert.match(output.join(""), /Secondary coverage: INCONCLUSIVE/u);
+  assert.match(output.join(""), /PrivacySpec result: INCOMPLETE/u);
+});
+
 test("reporter ignores malformed or unsupported diagnostic observations", async () => {
   const output = [];
   const reporter = new PrivacySpecReporter({ write: (message) => output.push(message) });
@@ -610,7 +1224,7 @@ test("reporter prints review findings without failing the Playwright run", async
     "PrivacySpec observed 1 tests\n",
     "PrivacySpec semantic findings: 1 (technical failures=0, new review findings=1, observations=1)\n",
     "PrivacySpec baseline: known=0, new=1, resolved=0\n",
-    "PrivacySpec finding: WARNING PS1004 [REVIEW_REQUIRED] [NEW] Personal data sent to external recipient :: personal.email -> external-request external https://analytics.example.test :: /event :: json.email [EXACT] (observations: 1; tests: customer can be created)\n",
+    "PrivacySpec finding: WARNING PS1004 [REVIEW_REQUIRED] [NEW] [CHANGE=NEW_RECIPIENT] Personal data sent to external recipient :: personal.email -> external-request external https://analytics.example.test :: /event :: json.email [EXACT] (observations: 1; tests: customer can be created)\n",
   ]);
 });
 
@@ -624,8 +1238,30 @@ test("reporter treats an ordinary personal-data URL as a new review finding", as
     "PrivacySpec observed 1 tests\n",
     "PrivacySpec semantic findings: 1 (technical failures=0, new review findings=1, observations=1)\n",
     "PrivacySpec baseline: known=0, new=1, resolved=0\n",
-    "PrivacySpec finding: WARNING PS1001 [REVIEW_REQUIRED] [NEW] Personal data or secret in URL :: personal.email -> request-url :: /customers :: url.query.email [EXACT] (observations: 1; tests: customer can be created)\n",
+    "PrivacySpec finding: WARNING PS1001 [REVIEW_REQUIRED] [NEW] [CHANGE=NEW_ENDPOINT] Personal data or secret in URL :: personal.email -> request-url :: /customers :: url.query.email [EXACT] (observations: 1; tests: customer can be created)\n",
   ]);
+});
+
+test("unified terminal details cap privacy findings and report the omitted count", async () => {
+  const output = [];
+  const reporter = new PrivacySpecReporter({ write: (message) => output.push(message) });
+  const findings = Array.from({ length: 25 }, (_, index) =>
+    reviewFinding({
+      flow: { endpoint: `/event-${String.fromCharCode(97 + index)}` },
+    }),
+  );
+  reporter.onTestEnd(testCase, resultWith([attachmentWith(...findings)]));
+
+  assert.equal(await reporter.onEnd({ status: "passed" }), undefined);
+  assert.equal(
+    output.filter((line) => /^PrivacySpec finding: WARNING PS1004/u.test(line)).length,
+    20,
+  );
+  assert.ok(
+    output.includes(
+      "PrivacySpec finding: 5 additional privacy findings omitted from terminal output\n",
+    ),
+  );
 });
 
 test("reporter aggregates duplicate terminal findings while retaining JSON occurrences", async (t) => {
@@ -668,7 +1304,7 @@ test("reporter aggregates duplicate terminal findings while retaining JSON occur
     "PrivacySpec observed 1 tests\n",
     "PrivacySpec semantic findings: 1 (technical failures=0, new review findings=1, observations=2)\n",
     "PrivacySpec baseline: known=0, new=1, resolved=0\n",
-    "PrivacySpec finding: WARNING PS1001 [REVIEW_REQUIRED] [NEW] Personal data or secret in URL :: personal.email -> request-url :: /customers :: url.query.email [EXACT] (observations: 2; tests: customer can be created, verification short code can be submitted)\n",
+    "PrivacySpec finding: WARNING PS1001 [REVIEW_REQUIRED] [NEW] [CHANGE=NEW_ENDPOINT] Personal data or secret in URL :: personal.email -> request-url :: /customers :: url.query.email [EXACT] (observations: 2; tests: customer can be created, verification short code can be submitted)\n",
   ]);
   const report = JSON.parse(await readFile(reportPath, "utf8"));
   assert.equal(report.findings.length, 2);

@@ -19,6 +19,7 @@ export interface RawNetworkSink {
   frameUrl?: string | undefined;
   pageUrl?: string | undefined;
   timestamp: number;
+  requestIdentity?: number | undefined;
 }
 
 export interface RawConsoleSink {

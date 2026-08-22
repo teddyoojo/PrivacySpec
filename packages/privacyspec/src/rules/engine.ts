@@ -163,7 +163,7 @@ const evaluateFlow = (flow: DataFlow, allowedOrigins: ReadonlySet<string>): Find
           `High-confidence ${flow.dataCategory} was observed in browser storage.`,
           flow,
           [
-            "The current automatic critical storage category is secret.password; PrivacySpec has no session- or API-token classifier.",
+            "The current prototype's automatic critical storage category is secret.password; it has no session- or API-token classifier.",
           ],
         ),
       );

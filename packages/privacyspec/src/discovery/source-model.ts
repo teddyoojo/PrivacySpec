@@ -6,7 +6,8 @@ export type ClassificationEvidence =
   | { kind: "autocomplete"; value: string }
   | { kind: "label"; value: string }
   | { kind: "name-attribute"; value: string }
-  | { kind: "pattern"; value: string };
+  | { kind: "pattern"; value: string }
+  | { kind: "json-key"; value: string };
 
 export interface ControlClassificationInput {
   value: string;
@@ -31,7 +32,8 @@ export interface SourceControlMetadata {
   placeholder?: string | undefined;
 }
 
-export interface RawSensitiveSource extends ControlClassification {
+export interface RawControlSensitiveSource extends ControlClassification {
+  kind: "control";
   raw: string;
   control: SourceControlMetadata;
   pageUrl: string;
@@ -39,8 +41,27 @@ export interface RawSensitiveSource extends ControlClassification {
   observedBy: "event" | "fallback";
 }
 
-export interface SensitiveSourceObservation extends ControlClassification {
+export interface ResponseSourceProvenance {
+  origin: string;
+  endpoint: string;
+  location: string;
+}
+
+export interface RawResponseSensitiveSource extends ControlClassification {
+  kind: "response-json";
+  category: "personal.email" | "personal.phone";
+  raw: string;
+  provenance: ResponseSourceProvenance;
+  timestamp: number;
+  observedBy: "response";
+  requestIdentity?: number | undefined;
+}
+
+export type RawSensitiveSource = RawControlSensitiveSource | RawResponseSensitiveSource;
+
+export interface ControlSensitiveSourceObservation extends ControlClassification {
   kind: "sensitive-source";
+  sourceKind: "form-input" | "dom-control";
   control: SourceControlMetadata;
   page: {
     origin: string;
@@ -48,6 +69,18 @@ export interface SensitiveSourceObservation extends ControlClassification {
   };
   observedBy: "event" | "fallback";
 }
+
+export interface ResponseSensitiveSourceObservation extends ControlClassification {
+  kind: "sensitive-source";
+  category: "personal.email" | "personal.phone";
+  sourceKind: "response-json";
+  provenance: ResponseSourceProvenance;
+  observedBy: "response";
+}
+
+export type SensitiveSourceObservation =
+  | ControlSensitiveSourceObservation
+  | ResponseSensitiveSourceObservation;
 
 export interface SourceLimitDiagnostic {
   kind: "diagnostic";

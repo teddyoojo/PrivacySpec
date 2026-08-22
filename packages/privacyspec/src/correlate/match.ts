@@ -15,7 +15,7 @@ import type {
   DataFlowTestMetadata,
   FirstPartyConfig,
 } from "./model.js";
-import { normalizePath, redactSensitive, sanitizeLabel } from "./redact.js";
+import { canonicalizeEndpointPath, redactSensitive, sanitizeLabel } from "./redact.js";
 import { createMatchVariants, createRedactionValues, type MatchVariant } from "./transforms.js";
 
 export const MAX_DATA_FLOWS_PER_TEST = 2_000;
@@ -24,6 +24,9 @@ export const MAX_CORRELATION_SCANNED_BYTES_PER_TEST = 67_108_864;
 export const MAX_PAGE_URLS_PER_TEST = 100;
 export const MAX_PAGE_URL_LENGTH = 8_192;
 const MAX_CORRELATION_URL_LENGTH = 8_192;
+const MAX_BASE64_CONTAINER_LENGTH = 65_536;
+const MAX_BASE64_TOKENS_PER_CANDIDATE = 32;
+const BASE64_TOKEN_PATTERN = /[A-Za-z0-9+/_-]{16,}={0,2}/gu;
 
 interface CorrelationState {
   comparisons: number;
@@ -31,6 +34,8 @@ interface CorrelationState {
   limitReached: boolean;
   stopped: boolean;
 }
+
+type DecodedCandidateCache = Map<string, readonly string[]>;
 
 interface FlowDestination {
   sinkKind: DataFlowSinkKind;
@@ -55,6 +60,7 @@ const findMatch = (
   value: string,
   variants: readonly MatchVariant[],
   state: CorrelationState,
+  decodedCandidateCache: DecodedCandidateCache,
 ): MatchVariant | undefined => {
   for (const variant of variants) {
     state.comparisons += 1;
@@ -69,7 +75,65 @@ const findMatch = (
     }
     if (value.includes(variant.value)) return variant;
   }
+
+  const decodedCandidates = decodeBase64Candidates(value, decodedCandidateCache);
+  const decodedNeedles = variants.filter((variant) =>
+    ["EXACT", "LOWERCASE", "UPPERCASE"].includes(variant.kind),
+  );
+  for (const decoded of decodedCandidates) {
+    for (const needle of decodedNeedles) {
+      state.comparisons += 1;
+      state.scannedBytes += decoded.length;
+      if (
+        state.comparisons > MAX_CORRELATION_COMPARISONS_PER_TEST ||
+        state.scannedBytes > MAX_CORRELATION_SCANNED_BYTES_PER_TEST
+      ) {
+        state.limitReached = true;
+        state.stopped = true;
+        return undefined;
+      }
+      if (decoded.includes(needle.value)) return { kind: "BASE64", value: needle.value };
+    }
+  }
   return undefined;
+};
+
+const decodeBase64Token = (token: string): string | undefined => {
+  if (token.length > MAX_BASE64_CONTAINER_LENGTH || token.length % 4 === 1) return undefined;
+  const normalized = token.replaceAll("-", "+").replaceAll("_", "/");
+  const unpadded = normalized.replace(/=+$/u, "");
+  const padded = `${unpadded}${"=".repeat((4 - (unpadded.length % 4)) % 4)}`;
+  try {
+    const bytes = Buffer.from(padded, "base64");
+    if (bytes.length === 0 || bytes.toString("base64").replace(/=+$/u, "") !== unpadded) {
+      return undefined;
+    }
+    const decoded = bytes.toString("utf8");
+    return Buffer.from(decoded, "utf8").equals(bytes) ? decoded : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+const decodeBase64Candidates = (value: string, cache: DecodedCandidateCache): readonly string[] => {
+  const cached = cache.get(value);
+  if (cached !== undefined) return cached;
+  if (value.length > MAX_BASE64_CONTAINER_LENGTH) {
+    cache.set(value, []);
+    return [];
+  }
+
+  const decoded = new Set<string>();
+  let tokenCount = 0;
+  for (const match of value.matchAll(BASE64_TOKEN_PATTERN)) {
+    if (tokenCount >= MAX_BASE64_TOKENS_PER_CANDIDATE) break;
+    tokenCount += 1;
+    const candidate = decodeBase64Token(match[0]);
+    if (candidate !== undefined) decoded.add(candidate);
+  }
+  const result = Array.from(decoded);
+  cache.set(value, result);
+  return result;
 };
 
 const decodeQueryName = (value: string): string => {
@@ -124,8 +188,10 @@ const storageSinkKind = (storageType: StorageType): DataFlowSinkKind => {
   return "cookie";
 };
 
-const sourceKind = (source: RawSensitiveSource): DataFlow["sourceKind"] =>
-  source.control.elementKind === "contenteditable" ? "dom-control" : "form-input";
+const sourceKind = (source: RawSensitiveSource): DataFlow["sourceKind"] => {
+  if (source.kind === "response-json") return "response-json";
+  return source.control.elementKind === "contenteditable" ? "dom-control" : "form-input";
+};
 
 const sanitizeTestMetadata = (
   test: DataFlowTestMetadata,
@@ -147,7 +213,7 @@ const sanitizeRecipient = (
 
 const endpointFromUrl = (rawUrl: string, sensitiveValues: readonly string[]): string => {
   try {
-    return normalizePath(new URL(rawUrl).pathname, sensitiveValues);
+    return canonicalizeEndpointPath(new URL(rawUrl).pathname, sensitiveValues);
   } catch {
     return "/";
   }
@@ -173,6 +239,9 @@ const flowIdentity = (flow: DataFlow): string =>
     flow.dataCategory,
     flow.sourceKind,
     flow.sourceConfidence,
+    flow.sourceProvenance?.origin,
+    flow.sourceProvenance?.endpoint,
+    flow.sourceProvenance?.location,
     flow.sinkKind,
     flow.recipient?.origin,
     flow.recipient?.host,
@@ -203,6 +272,13 @@ const createFlow = (
     transform: match.kind,
     test,
   };
+  if (source.kind === "response-json") {
+    flow.sourceProvenance = {
+      origin: redactSensitive(source.provenance.origin, sensitiveValues).slice(0, 2_048),
+      endpoint: canonicalizeEndpointPath(source.provenance.endpoint, sensitiveValues),
+      location: sanitizeLabel(source.provenance.location, sensitiveValues, 1_024),
+    };
+  }
   if (destination.recipient !== undefined) {
     flow.recipient = sanitizeRecipient(destination.recipient, sensitiveValues);
   }
@@ -225,9 +301,10 @@ const addCandidateFlow = (
   flows: DataFlow[],
   identities: Set<string>,
   state: CorrelationState,
+  decodedCandidateCache: DecodedCandidateCache,
 ): boolean => {
   if (state.stopped) return false;
-  const match = findMatch(candidateValue, variants, state);
+  const match = findMatch(candidateValue, variants, state, decodedCandidateCache);
   if (match === undefined) return false;
   const flow = createFlow(source, match, destination, test, sensitiveValues);
   const identity = flowIdentity(flow);
@@ -245,6 +322,9 @@ const addCandidateFlow = (
 const networkSinkKind = (recipient: ClassifiedRecipient, location: string): DataFlowSinkKind =>
   recipient.valid && !recipient.firstParty ? "external-request" : physicalNetworkSink(location);
 
+const isAmbientCookieLocation = (location: string): boolean =>
+  location.startsWith("header.cookie.");
+
 const correlateNetwork = (
   source: RawSensitiveSource,
   variants: readonly MatchVariant[],
@@ -255,6 +335,7 @@ const correlateNetwork = (
   flows: DataFlow[],
   identities: Set<string>,
   state: CorrelationState,
+  decodedCandidateCache: DecodedCandidateCache,
 ): void => {
   const add = (value: string, location: string): boolean =>
     addCandidateFlow(
@@ -264,8 +345,8 @@ const correlateNetwork = (
       {
         sinkKind: networkSinkKind(prepared.recipient, location),
         recipient: prepared.recipient,
-        method: sink.method,
-        endpoint: prepared.endpoint,
+        method: isAmbientCookieLocation(location) ? undefined : sink.method,
+        endpoint: isAmbientCookieLocation(location) ? undefined : prepared.endpoint,
         location,
       },
       test,
@@ -273,6 +354,7 @@ const correlateNetwork = (
       flows,
       identities,
       state,
+      decodedCandidateCache,
     );
 
   for (const candidate of prepared.candidates) {
@@ -280,13 +362,17 @@ const correlateNetwork = (
     if (state.stopped) return;
   }
   for (const [name, value] of Object.entries(sink.headers)) {
+    if (name === "cookie") continue;
     const location = `header.${name}`;
     add(name, location);
     add(value, location);
     if (state.stopped) return;
   }
   for (const material of sink.materials) {
-    if (material.location.startsWith("url.") || material.location.startsWith("header.")) {
+    if (
+      material.location.startsWith("url.") ||
+      (material.location.startsWith("header.") && !isAmbientCookieLocation(material.location))
+    ) {
       continue;
     }
     add(material.location, material.location);
@@ -304,6 +390,7 @@ const correlateConsole = (
   flows: DataFlow[],
   identities: Set<string>,
   state: CorrelationState,
+  decodedCandidateCache: DecodedCandidateCache,
 ): void => {
   const add = (value: string, location: string): boolean =>
     addCandidateFlow(
@@ -316,6 +403,7 @@ const correlateConsole = (
       flows,
       identities,
       state,
+      decodedCandidateCache,
     );
   const structured = sink.materials.filter((material) => material.location !== "console.text");
   let structuredMatch = false;
@@ -341,6 +429,7 @@ const correlateStorage = (
   flows: DataFlow[],
   identities: Set<string>,
   state: CorrelationState,
+  decodedCandidateCache: DecodedCandidateCache,
 ): void => {
   const kind = storageSinkKind(sink.storageType);
   addCandidateFlow(
@@ -353,6 +442,7 @@ const correlateStorage = (
     flows,
     identities,
     state,
+    decodedCandidateCache,
   );
   addCandidateFlow(
     source,
@@ -364,6 +454,7 @@ const correlateStorage = (
     flows,
     identities,
     state,
+    decodedCandidateCache,
   );
 };
 
@@ -376,6 +467,7 @@ const correlatePageUrl = (
   flows: DataFlow[],
   identities: Set<string>,
   state: CorrelationState,
+  decodedCandidateCache: DecodedCandidateCache,
 ): void => {
   for (const candidate of prepared.candidates) {
     addCandidateFlow(
@@ -393,6 +485,7 @@ const correlatePageUrl = (
       flows,
       identities,
       state,
+      decodedCandidateCache,
     );
     if (state.stopped) return;
   }
@@ -408,6 +501,7 @@ const correlateSink = (
   flows: DataFlow[],
   identities: Set<string>,
   state: CorrelationState,
+  decodedCandidateCache: DecodedCandidateCache,
 ): void => {
   if (sink.kind === "network") {
     const prepared = preparedNetwork.get(sink);
@@ -422,19 +516,41 @@ const correlateSink = (
       flows,
       identities,
       state,
+      decodedCandidateCache,
     );
     return;
   }
   if (sink.kind === "console") {
-    correlateConsole(source, variants, sink, test, sensitiveValues, flows, identities, state);
+    correlateConsole(
+      source,
+      variants,
+      sink,
+      test,
+      sensitiveValues,
+      flows,
+      identities,
+      state,
+      decodedCandidateCache,
+    );
     return;
   }
-  correlateStorage(source, variants, sink, test, sensitiveValues, flows, identities, state);
+  correlateStorage(
+    source,
+    variants,
+    sink,
+    test,
+    sensitiveValues,
+    flows,
+    identities,
+    state,
+    decodedCandidateCache,
+  );
 };
 
 export const correlateSensitiveData = (input: CorrelationInput): CorrelationResult => {
   const flows: DataFlow[] = [];
   const identities = new Set<string>();
+  const decodedCandidateCache: DecodedCandidateCache = new Map();
   const state: CorrelationState = {
     comparisons: 0,
     scannedBytes: 0,
@@ -460,10 +576,24 @@ export const correlateSensitiveData = (input: CorrelationInput): CorrelationResu
   for (const source of input.sources) {
     const variants = createMatchVariants(source);
     for (const sink of input.sinks) {
-      // Event-observed values cannot have caused an occurrence captured before
-      // the user entered them. Fallback sources are final-state samples, so
-      // their teardown timestamp does not describe when the value first existed.
-      if (source.observedBy === "event" && sink.timestamp < source.timestamp) continue;
+      // Browser-to-worker delivery order is not a causal clock. Control sources
+      // therefore correlate across their isolated test, like teardown fallback
+      // samples. Response values are different: the browser cannot expose them to
+      // later code until the response event, so retain strict response ordering.
+      const isFinalStorageSnapshot = sink.kind === "storage" && sink.observedBy === "snapshot";
+      const isOriginatingRequest =
+        source.kind === "response-json" &&
+        source.requestIdentity !== undefined &&
+        sink.kind === "network" &&
+        sink.requestIdentity === source.requestIdentity;
+      if (
+        isOriginatingRequest ||
+        (source.observedBy === "response" &&
+          !isFinalStorageSnapshot &&
+          sink.timestamp <= source.timestamp)
+      ) {
+        continue;
+      }
       correlateSink(
         source,
         variants,
@@ -474,6 +604,7 @@ export const correlateSensitiveData = (input: CorrelationInput): CorrelationResu
         flows,
         identities,
         state,
+        decodedCandidateCache,
       );
       if (state.stopped) break;
     }
@@ -488,6 +619,7 @@ export const correlateSensitiveData = (input: CorrelationInput): CorrelationResu
           flows,
           identities,
           state,
+          decodedCandidateCache,
         );
         if (state.stopped) break;
       }

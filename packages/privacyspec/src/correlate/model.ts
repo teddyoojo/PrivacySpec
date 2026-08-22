@@ -1,4 +1,8 @@
-import type { RawSensitiveSource, SourceConfidence } from "../discovery/source-model.js";
+import type {
+  RawSensitiveSource,
+  ResponseSourceProvenance,
+  SourceConfidence,
+} from "../discovery/source-model.js";
 import type { RawSink } from "../observe/sink-model.js";
 
 export type TransformKind =
@@ -26,6 +30,8 @@ export interface DataFlowTestMetadata {
   project: string;
 }
 
+export type DataFlowSourceKind = "form-input" | "dom-control" | "response-json";
+
 export interface FirstPartyConfig {
   origins?: readonly string[] | undefined;
   hosts?: readonly string[] | undefined;
@@ -34,8 +40,9 @@ export interface FirstPartyConfig {
 export interface DataFlow {
   kind: "data-flow";
   dataCategory: RawSensitiveSource["category"];
-  sourceKind: "form-input" | "dom-control";
+  sourceKind: DataFlowSourceKind;
   sourceConfidence: SourceConfidence;
+  sourceProvenance?: ResponseSourceProvenance | undefined;
   sinkKind: DataFlowSinkKind;
   recipient?:
     | {

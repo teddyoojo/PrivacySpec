@@ -70,7 +70,12 @@ test("network body parsing is structured, defensive, and bounded", () => {
 test("network capture retains event-time attribution across delayed header reads", async () => {
   const context = new EventEmitter();
   const registry = new SinkRunRegistry();
-  const observer = new NetworkObserver(registry);
+  const observer = new NetworkObserver(
+    registry,
+    () => true,
+    () => 7,
+    () => 9,
+  );
   let currentFrameUrl = "https://app.example.test/start";
   let currentPageUrl = "https://app.example.test/start";
   let resolveHeaders;
@@ -100,6 +105,108 @@ test("network capture retains event-time attribution across delayed header reads
     const captured = registry.snapshot().network[0];
     assert.equal(captured?.frameUrl, "https://app.example.test/start");
     assert.equal(captured?.pageUrl, "https://app.example.test/start");
+    assert.equal(captured?.timestamp, 7);
+    assert.equal(captured?.requestIdentity, 9);
+  } finally {
+    observer.detach();
+    registry.dispose();
+  }
+});
+
+test("network capture filters queryless and recognized Vite static requests before a live source", async () => {
+  const context = new EventEmitter();
+  const registry = new SinkRunRegistry();
+  const filteredMetadata = [];
+  let hasSource = false;
+  const observer = new NetworkObserver(
+    {
+      addNetwork: (sink) => registry.addNetwork(sink),
+      addNetworkMetadata: (metadata) => filteredMetadata.push(metadata),
+      markLimitReached: (collector) => registry.markLimitReached(collector),
+    },
+    () => hasSource,
+  );
+  const request = (url, resourceType) => ({
+    allHeaders: async () => ({}),
+    headers: () => ({}),
+    frame: () => {
+      throw new Error("no frame");
+    },
+    method: () => "GET",
+    postDataBuffer: () => null,
+    resourceType: () => resourceType,
+    url: () => url,
+  });
+
+  try {
+    observer.attach(context);
+    context.emit("request", request("https://app.example.test/assets/app.js", "script"));
+    context.emit("request", request("https://app.example.test/assets/app.js?user=1", "script"));
+    context.emit(
+      "request",
+      request("https://app.example.test/node_modules/.vite/deps/library.js?v=deadbeef", "script"),
+    );
+    context.emit(
+      "request",
+      request("https://app.example.test/node_modules/worker.js?worker", "script"),
+    );
+    context.emit(
+      "request",
+      request("https://app.example.test/src/App.svelte?svelte&type=style&lang.css", "script"),
+    );
+    context.emit(
+      "request",
+      request("https://app.example.test/assets/app.js?v=personal-value", "script"),
+    );
+    hasSource = true;
+    context.emit("request", request("https://app.example.test/assets/after.js", "script"));
+    await observer.flush();
+
+    assert.deepEqual(observer.snapshotCoverage(), {
+      requests: { seen: 7, accepted: 3, filteredLowValueStatic: 4 },
+    });
+    assert.equal(registry.snapshot().network.length, 3);
+    assert.equal(filteredMetadata.length, 4);
+    assert.deepEqual(
+      filteredMetadata.map((metadata) => metadata.resourceType),
+      ["script", "script", "script", "script"],
+    );
+  } finally {
+    observer.detach();
+    registry.dispose();
+  }
+});
+
+test("network capture separates bounded cookie values into semantic locations", async () => {
+  const context = new EventEmitter();
+  const registry = new SinkRunRegistry();
+  const observer = new NetworkObserver(registry);
+  const request = {
+    allHeaders: async () => ({ cookie: "auth_token=encoded-profile; preference=compact" }),
+    headers: () => ({ cookie: "auth_token=encoded-profile; preference=compact" }),
+    frame: () => {
+      throw new Error("no frame");
+    },
+    method: () => "GET",
+    postDataBuffer: () => null,
+    resourceType: () => "fetch",
+    url: () => "https://app.example.test/api/profile",
+  };
+
+  try {
+    observer.attach(context);
+    context.emit("request", request);
+    await observer.flush();
+
+    assert.deepEqual(
+      registry
+        .snapshot()
+        .network[0]?.materials.filter((material) => material.location.startsWith("header.cookie.")),
+      [
+        { location: "header.cookie.auth_token", value: "encoded-profile" },
+        { location: "header.cookie.preference", value: "compact" },
+      ],
+    );
   } finally {
     observer.detach();
     registry.dispose();
@@ -168,7 +275,7 @@ test("console and storage registries enforce aggregate retained-byte budgets", (
 test("console arguments are bounded in the page before transfer to the worker", async () => {
   const context = new EventEmitter();
   const registry = new SinkRunRegistry();
-  const observer = new ConsoleObserver(registry);
+  const observer = new ConsoleObserver(registry, () => 17);
   const largeValue = Array.from({ length: 1_000 }, (_, index) => ({
     index,
     value: "x".repeat(1_000),
@@ -200,11 +307,55 @@ test("console arguments are bounded in the page before transfer to the worker", 
     observer.attach(context);
     context.emit("console", message);
     await observer.flush();
-    const captured = registry.snapshot().console[0]?.materials[0]?.value;
+    const sink = registry.snapshot().console[0];
+    const captured = sink?.materials[0]?.value;
     assert.equal(evaluateCalls, 1);
     assert.equal(jsonValueCalls, 0);
     assert.equal(captured?.includes("[truncated]"), true);
     assert.equal((captured?.length ?? Number.POSITIVE_INFINITY) <= 65_536, true);
+    assert.equal(sink?.timestamp, 17);
+  } finally {
+    observer.detach();
+    registry.dispose();
+  }
+});
+
+test("console rendered text is snapshotted before asynchronous argument serialization", async () => {
+  const context = new EventEmitter();
+  const registry = new SinkRunRegistry();
+  const observer = new ConsoleObserver(registry, () => 23);
+  let renderedText = "Stable rendered family 123";
+  let releaseArgument;
+  const argumentReady = new Promise((resolve) => {
+    releaseArgument = resolve;
+  });
+  const message = {
+    args: () => [
+      {
+        toString: () => "JSHandle@object",
+        evaluate: async () => {
+          await argumentReady;
+          return '{"detail":"structured privacy material"}';
+        },
+      },
+    ],
+    text: () => renderedText,
+    location: () => ({}),
+    page: () => undefined,
+    type: () => "error",
+  };
+
+  try {
+    observer.attach(context);
+    context.emit("console", message);
+    renderedText = "Destroyed-context fallback text";
+    releaseArgument();
+    await observer.flush();
+    const materials = registry.snapshot().console[0]?.materials;
+    assert.deepEqual(materials, [
+      { location: "console.argument.0", value: '{"detail":"structured privacy material"}' },
+      { location: "console.text", value: "Stable rendered family 123" },
+    ]);
   } finally {
     observer.detach();
     registry.dispose();
@@ -245,6 +396,30 @@ test("sink registry rejects cross-test storage events and clears transient value
   registryA.addStorage(sink);
   assert.equal(registryA.snapshot().storage.length, 0);
   registryB.dispose();
+});
+
+test("streamed storage writes accept the worker event sequence", () => {
+  const registry = new SinkRunRegistry();
+  registry.recordStorageStreamEvent(
+    {
+      version: 1,
+      token: registry.streamToken,
+      kind: "storage-write",
+      sink: {
+        kind: "storage",
+        storageType: "local-storage",
+        key: "contact",
+        value: ["worker-clock", "example.test"].join("@"),
+        pageUrl: "https://app.example.test/",
+        observedBy: "write",
+        timestamp: 10,
+      },
+    },
+    50,
+  );
+
+  assert.equal(registry.snapshot().storage[0]?.timestamp, 50);
+  registry.dispose();
 });
 
 test("sink sanitization removes source values from paths, keys, and structured locations", () => {

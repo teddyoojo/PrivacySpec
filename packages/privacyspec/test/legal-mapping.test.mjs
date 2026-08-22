@@ -37,7 +37,7 @@ const stringsIn = (value) => {
   return Object.values(value).flatMap(stringsIn);
 };
 
-test("the mapping registry covers exactly the six stable rules and is immutable", () => {
+test("the Phase 9 registry covers exactly the six stable rules and is immutable", () => {
   assert.deepEqual(Object.keys(RULE_LEGAL_MAPPINGS).sort(), ruleIds);
   assert.deepEqual(Object.keys(RULE_DEFINITIONS).sort(), ruleIds);
   assert.equal(Object.isFrozen(RULE_LEGAL_MAPPINGS), true);

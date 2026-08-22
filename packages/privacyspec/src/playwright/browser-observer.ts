@@ -7,7 +7,7 @@ import {
 import type {
   ControlClassification,
   ControlClassificationInput,
-  RawSensitiveSource,
+  RawControlSensitiveSource,
   SourceControlMetadata,
 } from "../discovery/source-model.js";
 
@@ -18,7 +18,7 @@ interface BrowserObserverState {
   version: 1;
   sampleCurrentControls: () => void;
   flushPending: () => Promise<void>;
-  snapshot: () => { sources: RawSensitiveSource[]; limitReached: boolean };
+  snapshot: () => { sources: RawControlSensitiveSource[]; limitReached: boolean };
 }
 
 type BrowserGlobal = typeof globalThis & {
@@ -42,7 +42,7 @@ const installBrowserObserver = (
   // Capture the native clock before application code can replace Date.now().
   // Correlation compares these timestamps with worker-side sink timestamps.
   const now = Date.now.bind(Date);
-  const sources: RawSensitiveSource[] = [];
+  const sources: RawControlSensitiveSource[] = [];
   const identities = new Set<string>();
   const pending = new Set<Promise<void>>();
   let limitReached = false;
@@ -50,7 +50,7 @@ const installBrowserObserver = (
 
   const streamEvent = (
     event: SensitiveSourceStreamEvent,
-    bufferedSource?: RawSensitiveSource,
+    bufferedSource?: RawControlSensitiveSource,
   ): void => {
     const binding = (browserGlobal as unknown as Record<string, unknown>)[streamBinding];
     if (typeof binding !== "function") return;
@@ -184,7 +184,8 @@ const installBrowserObserver = (
     }
 
     identities.add(identity);
-    const source: RawSensitiveSource = {
+    const source: RawControlSensitiveSource = {
+      kind: "control",
       ...classification,
       raw: observed.raw,
       control: observed.control,
@@ -223,14 +224,14 @@ export const createBrowserObserverScript = (streamToken: string): string =>
   `(() => { const classify = ${classifySensitiveControl.toString()}; const install = ${installBrowserObserver.toString()}; install(classify, ${JSON.stringify(OBSERVER_GLOBAL)}, ${JSON.stringify(SOURCE_STREAM_BINDING)}, ${JSON.stringify(streamToken)}, ${MAX_SENSITIVE_SOURCES_PER_TEST}); })();`;
 
 export interface CollectedSensitiveSources {
-  sources: RawSensitiveSource[];
+  sources: RawControlSensitiveSource[];
   limitReached: boolean;
 }
 
 export const collectSensitiveSources = async (
   context: BrowserContext,
 ): Promise<CollectedSensitiveSources> => {
-  const collected: RawSensitiveSource[] = [];
+  const collected: RawControlSensitiveSource[] = [];
   let limitReached = false;
 
   for (const page of context.pages()) {

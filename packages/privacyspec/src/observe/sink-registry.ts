@@ -24,6 +24,10 @@ export interface SinkRegistrySnapshot {
   limitsReached: Array<"network" | "console" | "storage">;
 }
 
+export type ParsedStorageStreamEvent =
+  | { kind: "storage-write"; sink: RawStorageSink }
+  | { kind: "limit-reached" };
+
 const storageTypes = new Set<StorageType>(["local-storage", "session-storage", "cookie"]);
 
 const cloneNetwork = (sink: RawNetworkSink): RawNetworkSink => ({
@@ -103,6 +107,20 @@ const parseStorageSink = (value: unknown): RawStorageSink | undefined => {
     observedBy: value.observedBy,
     timestamp: value.timestamp,
   };
+};
+
+export const parseStorageStreamEvent = (
+  value: unknown,
+  token: string,
+  timestamp?: number,
+): ParsedStorageStreamEvent | undefined => {
+  if (!isRecord(value) || value.version !== 1 || value.token !== token) return undefined;
+  if (value.kind === "limit-reached") return { kind: "limit-reached" };
+  if (value.kind !== "storage-write" || !isRecord(value.sink)) return undefined;
+  const sink = parseStorageSink(
+    timestamp === undefined ? value.sink : { ...value.sink, timestamp },
+  );
+  return sink === undefined ? undefined : { kind: "storage-write", sink };
 };
 
 export class SinkRunRegistry {
@@ -200,20 +218,11 @@ export class SinkRunRegistry {
     if (this.#active) this.#limitsReached.add(collector);
   }
 
-  recordStorageStreamEvent(value: unknown): void {
-    if (
-      !this.#active ||
-      !isRecord(value) ||
-      value.version !== 1 ||
-      value.token !== this.#streamToken
-    ) {
-      return;
-    }
-    if (value.kind === "limit-reached") {
-      this.#limitsReached.add("storage");
-      return;
-    }
-    if (value.kind === "storage-write") this.addStorage(value.sink);
+  recordStorageStreamEvent(value: unknown, timestamp?: number): void {
+    if (!this.#active) return;
+    const event = parseStorageStreamEvent(value, this.#streamToken, timestamp);
+    if (event?.kind === "limit-reached") this.#limitsReached.add("storage");
+    else if (event?.kind === "storage-write") this.addStorage(event.sink);
   }
 
   snapshot(): SinkRegistrySnapshot {

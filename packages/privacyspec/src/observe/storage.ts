@@ -1,4 +1,6 @@
 import type { BrowserContext } from "@playwright/test";
+import { compareCanonicalStrings } from "../canonical-order.js";
+import { isSecurityCookieName } from "./response-security.js";
 import type { RawStorageSink, StorageType } from "./sink-model.js";
 import {
   MAX_STORAGE_SINKS_PER_TEST,
@@ -268,14 +270,47 @@ const collectFrameStorage = async (
 
 export const collectFinalStorage = async (
   context: BrowserContext,
-): Promise<{ sinks: RawStorageSink[]; limitReached: boolean }> => {
+): Promise<{
+  sinks: RawStorageSink[];
+  limitReached: boolean;
+  securityCookies: Array<{
+    name: string;
+    domain: string;
+    path: string;
+    secure: boolean;
+    httpOnly: boolean;
+    sameSite: "strict" | "lax" | "none" | "unspecified";
+  }>;
+}> => {
   const frameStorage = await collectFrameStorage(context);
   const sinks = [...frameStorage.sinks];
+  const securityCookies: Array<{
+    name: string;
+    domain: string;
+    path: string;
+    secure: boolean;
+    httpOnly: boolean;
+    sameSite: "strict" | "lax" | "none" | "unspecified";
+  }> = [];
   let limitReached = frameStorage.limitReached;
 
   try {
     const storageState = await context.storageState();
     for (const cookie of storageState.cookies) {
+      if (isSecurityCookieName(cookie.name) && securityCookies.length < 32) {
+        const sameSite = cookie.sameSite?.toLowerCase();
+        securityCookies.push({
+          name: cookie.name.toLowerCase(),
+          domain: cookie.domain.toLowerCase().replace(/^\./u, ""),
+          path: cookie.path,
+          secure: cookie.secure,
+          httpOnly: cookie.httpOnly,
+          sameSite:
+            sameSite === "strict" || sameSite === "lax" || sameSite === "none"
+              ? sameSite
+              : "unspecified",
+        });
+      }
       if (
         sinks.length >= MAX_STORAGE_SINKS_PER_TEST ||
         cookie.value.length > MAX_STORAGE_VALUE_LENGTH
@@ -320,5 +355,11 @@ export const collectFinalStorage = async (
     // A user test may explicitly close its context before teardown.
   }
 
-  return { sinks, limitReached };
+  securityCookies.sort((left, right) =>
+    compareCanonicalStrings(
+      JSON.stringify([left.domain, left.path, left.name]),
+      JSON.stringify([right.domain, right.path, right.name]),
+    ),
+  );
+  return { sinks, limitReached, securityCookies };
 };

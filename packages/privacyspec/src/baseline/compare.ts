@@ -1,5 +1,6 @@
-import { normalizePath } from "../correlate/redact.js";
+import { canonicalizeEndpointPath } from "../correlate/redact.js";
 import type { Finding } from "../rules/model.js";
+import { namespacedAnalysisIdentity, PRIVACY_ANALYSIS_MODULE } from "../runtime/modules.js";
 import type {
   BaselineFile,
   BaselineFlow,
@@ -18,6 +19,14 @@ export interface BaselineComparison {
   new: ObservedBaselineFlow[];
   resolved: BaselineFlow[];
 }
+
+export type BaselineChangeReason =
+  | "NEW_RECIPIENT"
+  | "NEW_CATEGORY"
+  | "NEW_ENDPOINT"
+  | "NEW_LOCATION"
+  | "NEW_TRANSFORM"
+  | "NEW_FLOW";
 
 const storageSinkKinds = new Set<BaselineFlowIdentity["sinkKind"]>([
   "local-storage",
@@ -43,7 +52,7 @@ export const isBaselineEligibleIdentity = (identity: BaselineFlowIdentity): bool
 
 export const normalizeBaselineEndpoint = (endpoint: string | undefined): string | undefined => {
   if (endpoint === undefined) return undefined;
-  return normalizePath(endpoint, []);
+  return canonicalizeEndpointPath(endpoint, []);
 };
 
 export const createBaselineKey = (identity: BaselineFlowIdentity): string =>
@@ -64,6 +73,38 @@ export const createBaselineFlowCandidate = (
   const candidate = createSemanticFindingCandidate(finding);
   if (!isBaselineEligibleIdentity(candidate)) return undefined;
   return candidate;
+};
+
+export const classifyBaselineChange = (
+  candidate: BaselineFlowCandidate,
+  acceptedFlows: readonly BaselineFlow[],
+): BaselineChangeReason => {
+  const sameRuleAndSink = acceptedFlows.filter(
+    (flow) => flow.ruleId === candidate.ruleId && flow.sinkKind === candidate.sinkKind,
+  );
+  if (sameRuleAndSink.length === 0) {
+    if (candidate.recipient !== undefined) return "NEW_RECIPIENT";
+    if (candidate.endpoint !== undefined) return "NEW_ENDPOINT";
+    if (candidate.location !== undefined) return "NEW_LOCATION";
+    return "NEW_FLOW";
+  }
+
+  const sameRecipient = sameRuleAndSink.filter((flow) => flow.recipient === candidate.recipient);
+  if (sameRecipient.length === 0) return "NEW_RECIPIENT";
+
+  const sameCategory = sameRecipient.filter((flow) => flow.dataCategory === candidate.dataCategory);
+  if (sameCategory.length === 0) return "NEW_CATEGORY";
+
+  const sameEndpoint = sameCategory.filter((flow) => flow.endpoint === candidate.endpoint);
+  if (sameEndpoint.length === 0) return "NEW_ENDPOINT";
+
+  const sameLocation = sameEndpoint.filter((flow) => flow.location === candidate.location);
+  if (sameLocation.length === 0) return "NEW_LOCATION";
+
+  if (!sameLocation.some((flow) => flow.transform === candidate.transform)) {
+    return "NEW_TRANSFORM";
+  }
+  return "NEW_FLOW";
 };
 
 export const createSemanticFindingCandidate = (finding: Finding): BaselineFlowCandidate => {
@@ -87,6 +128,8 @@ export const createSemanticFindingCandidate = (finding: Finding): BaselineFlowCa
 };
 
 const findingIdentity = (finding: Finding): string => JSON.stringify(finding);
+const ownedPrivacyIdentity = (identity: string): string =>
+  namespacedAnalysisIdentity(PRIVACY_ANALYSIS_MODULE, identity);
 
 export const compareBaseline = (
   findings: readonly Finding[],
@@ -96,9 +139,10 @@ export const compareBaseline = (
   for (const finding of findings) {
     const flow = createBaselineFlowCandidate(finding);
     if (flow === undefined) continue;
-    const observed = observedByKey.get(flow.key);
+    const ownedKey = ownedPrivacyIdentity(flow.key);
+    const observed = observedByKey.get(ownedKey);
     if (observed === undefined) {
-      observedByKey.set(flow.key, { flow, findings: [finding] });
+      observedByKey.set(ownedKey, { flow, findings: [finding] });
     } else if (
       !observed.findings.some(
         (candidate) => findingIdentity(candidate) === findingIdentity(finding),
@@ -108,14 +152,18 @@ export const compareBaseline = (
     }
   }
 
-  const baselineByKey = new Map((baseline?.flows ?? []).map((flow) => [flow.key, flow]));
+  const baselineByKey = new Map(
+    (baseline?.flows ?? []).map((flow) => [ownedPrivacyIdentity(flow.key), flow]),
+  );
   const known: ObservedBaselineFlow[] = [];
   const newlyObserved: ObservedBaselineFlow[] = [];
   for (const observed of observedByKey.values()) {
     observed.findings.sort((left, right) =>
       findingIdentity(left).localeCompare(findingIdentity(right)),
     );
-    (baselineByKey.has(observed.flow.key) ? known : newlyObserved).push(observed);
+    (baselineByKey.has(ownedPrivacyIdentity(observed.flow.key)) ? known : newlyObserved).push(
+      observed,
+    );
   }
 
   const byKey = (
@@ -129,7 +177,7 @@ export const compareBaseline = (
     .map(({ flow }) => flow)
     .sort((left, right) => left.key.localeCompare(right.key));
   const resolved = (baseline?.flows ?? [])
-    .filter((flow) => !observedByKey.has(flow.key))
+    .filter((flow) => !observedByKey.has(ownedPrivacyIdentity(flow.key)))
     .slice()
     .sort((left, right) => left.key.localeCompare(right.key));
 

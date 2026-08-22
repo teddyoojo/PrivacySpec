@@ -1,6 +1,6 @@
 # Legal mapping policy
 
-**Status:** Public beta policy
+**Status:** Phase 9 prototype policy
 **Mappings last reviewed:** 2026-08-20
 
 PrivacySpec reports browser-side technical observations. Its mapping layer explains why an
@@ -21,7 +21,7 @@ Contextual EU regulatory relevance
 The rule engine remains the source of technical findings. The local registry in
 `packages/privacyspec/src/rules/legal-map.ts` is keyed by the existing stable rule ID. Mapping text,
 source URLs, and review dates do not enter semantic baseline keys and are not duplicated into the
-per-test Playwright attachment. Reporting resolves the same rule ID into aggregate
+per-test Playwright attachment. Phase 10 reporting can resolve the same rule ID into aggregate
 report metadata.
 
 The registry uses these relationship strengths:

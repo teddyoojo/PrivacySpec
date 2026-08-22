@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  classifyBaselineChange,
   compareBaseline,
   createBaselineFlowCandidate,
   createBaselineKey,
@@ -68,6 +69,8 @@ const candidate = (finding = reviewFinding()) => {
   return result;
 };
 
+const accepted = (flowCandidate) => ({ ...flowCandidate, status: "accepted" });
+
 test("semantic keys normalize dynamic paths and exclude test, method, and source metadata", () => {
   const first = candidate();
   const second = candidate(
@@ -92,6 +95,10 @@ test("semantic keys normalize dynamic paths and exclude test, method, and source
     "/objects/:uuid",
   );
   assert.equal(normalizeBaselineEndpoint("/objects/0123456789abcdef01234567"), "/objects/:id");
+  assert.equal(
+    normalizeBaselineEndpoint("/members/q7_amber_forest/records/cmt3ab4cd5ef6gh7ij8kl9mn0.data"),
+    normalizeBaselineEndpoint("/members/m2_silver_harbor/records/cmx9zy8wv7ut6sr5qp4on3ml2.data"),
+  );
 
   const identity = {
     ruleId: first.ruleId,
@@ -114,6 +121,36 @@ test("semantic keys normalize dynamic paths and exclude test, method, and source
   ]) {
     assert.notEqual(createBaselineKey(changed), key);
   }
+});
+
+test("new review flows receive deterministic semantic change reasons", () => {
+  const existing = candidate();
+
+  assert.equal(classifyBaselineChange(existing, []), "NEW_RECIPIENT");
+  assert.equal(
+    classifyBaselineChange(
+      candidate(reviewFinding({ dataCategory: "personal.phone", location: "json.phone" })),
+      [accepted(existing)],
+    ),
+    "NEW_CATEGORY",
+  );
+  assert.equal(
+    classifyBaselineChange(candidate(reviewFinding({ endpoint: "/another" })), [
+      accepted(existing),
+    ]),
+    "NEW_ENDPOINT",
+  );
+  assert.equal(
+    classifyBaselineChange(candidate(reviewFinding({ location: "json.contact" })), [
+      accepted(existing),
+    ]),
+    "NEW_LOCATION",
+  );
+  assert.equal(
+    classifyBaselineChange(candidate(reviewFinding({ transform: "BASE64" })), [accepted(existing)]),
+    "NEW_TRANSFORM",
+  );
+  assert.equal(classifyBaselineChange(existing, [accepted(existing)]), "NEW_FLOW");
 });
 
 test("comparison groups review findings by semantic key and classifies known, new, and resolved", () => {

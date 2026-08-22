@@ -1,7 +1,11 @@
+# Dependencies
 node_modules/
-dist/
 
-# Playwright output
+# Build output
+dist/
+build/
+
+# Playwright
 playwright-report/
 test-results/
 blob-report/
@@ -9,11 +13,22 @@ blob-report/
 # PrivacySpec runtime artifacts
 .privacyspec/
 privacyspec-report.json
+# Pre-rename artifacts remain ignored so a checkout update cannot expose old sensitive test output.
+.conformtest/
+conformtest-report.json
+*.sarif
 
-# Environment and editor files
+# Environment
 .env
 .env.*
 !.env.example
+
+# OS / IDE
 .DS_Store
 Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Logs
 *.log

@@ -4,12 +4,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import {
+  DEPENDENCY_ATTACHMENT_CONTENT_TYPE,
+  DEPENDENCY_ATTACHMENT_NAME,
+} from "../dist/analyzers/dependency/artifact.js";
+import {
+  RUNTIME_FAILURE_ATTACHMENT_CONTENT_TYPE,
+  RUNTIME_FAILURE_ATTACHMENT_NAME,
+} from "../dist/analyzers/runtime-failure/artifact.js";
+import {
+  SECURITY_ATTACHMENT_CONTENT_TYPE,
+  SECURITY_ATTACHMENT_NAME,
+} from "../dist/analyzers/security/artifact.js";
 import PrivacySpecReporter from "../dist/playwright/reporter.js";
 import {
   createEmptyPrivacySpecResult,
   PRIVACYSPEC_ATTACHMENT_CONTENT_TYPE,
   PRIVACYSPEC_ATTACHMENT_NAME,
 } from "../dist/playwright/result.js";
+import { readPrivacySpecReport } from "../dist/report/read.js";
 
 const testCase = { title: "ordinary QA test" };
 const startedAt = new Date("2026-08-20T12:00:00.000Z");
@@ -55,6 +68,31 @@ const attachmentWith = (...observations) => {
   };
 };
 
+const analyzerAttachment = (name, contentType, analyzerId) => ({
+  name,
+  contentType,
+  body: Buffer.from(
+    JSON.stringify({
+      schemaVersion: 1,
+      analyzerId,
+      coverage: "complete",
+      inventory: [],
+      diagnostics: [],
+    }),
+  ),
+});
+
+const completeAttachments = (privacyAttachment) => [
+  privacyAttachment,
+  analyzerAttachment(DEPENDENCY_ATTACHMENT_NAME, DEPENDENCY_ATTACHMENT_CONTENT_TYPE, "dependency"),
+  analyzerAttachment(SECURITY_ATTACHMENT_NAME, SECURITY_ATTACHMENT_CONTENT_TYPE, "security"),
+  analyzerAttachment(
+    RUNTIME_FAILURE_ATTACHMENT_NAME,
+    RUNTIME_FAILURE_ATTACHMENT_CONTENT_TYPE,
+    "runtime-failure",
+  ),
+];
+
 const testResult = (attachments, status = "passed", duration = 125) => ({
   attachments,
   status,
@@ -67,7 +105,7 @@ const fullResult = (status = "passed", duration = 500) => ({
   duration,
 });
 
-test("schema-v1 JSON report records CI outcome, mappings, baseline state, and performance", async (t) => {
+test("schema-v4 JSON report unifies module outcomes with privacy evidence and performance", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "privacyspec-json-report-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const reportPath = join(directory, "privacyspec-report.json");
@@ -84,34 +122,36 @@ test("schema-v1 JSON report records CI outcome, mappings, baseline state, and pe
   reporter.onBegin({ projects: [{ name: "chromium" }] });
   reporter.onTestEnd(
     testCase,
-    testResult([
-      attachmentWith(
-        {
-          kind: "sensitive-source",
-          raw: rawFixtureValue,
-          category: "personal.email",
-          confidence: "high",
-          evidence: [{ kind: "input-type", value: "email" }],
-          control: { elementKind: "input", type: "email" },
-          page: { origin: "https://app.example.test", path: "/customers/new" },
-          observedBy: "event",
-        },
-        {
-          kind: "sink",
-          sink: "network",
-          method: "POST",
-          resourceType: "fetch",
-          recipient: finding.flow.recipient,
-          endpoint: "/event",
-          bodyKind: "json",
-          bodySize: 42,
-          bodyTruncated: false,
-          locations: ["json.email"],
-        },
-        finding.flow,
-        finding,
+    testResult(
+      completeAttachments(
+        attachmentWith(
+          {
+            kind: "sensitive-source",
+            raw: rawFixtureValue,
+            category: "personal.email",
+            confidence: "high",
+            evidence: [{ kind: "input-type", value: "email" }],
+            control: { elementKind: "input", type: "email" },
+            page: { origin: "https://app.example.test", path: "/customers/new" },
+            observedBy: "event",
+          },
+          {
+            kind: "sink",
+            sink: "network",
+            method: "POST",
+            resourceType: "fetch",
+            recipient: finding.flow.recipient,
+            endpoint: "/event",
+            bodyKind: "json",
+            bodySize: 42,
+            bodyTruncated: false,
+            locations: ["json.email"],
+          },
+          finding.flow,
+          finding,
+        ),
       ),
-    ]),
+    ),
   );
 
   assert.equal(await reporter.onEnd(fullResult()), undefined);
@@ -119,8 +159,8 @@ test("schema-v1 JSON report records CI outcome, mappings, baseline state, and pe
   const report = JSON.parse(serialized);
   const metadata = await stat(reportPath);
 
-  assert.equal(report.schemaVersion, 1);
-  assert.deepEqual(report.tool, { name: "privacyspec", version: "0.1.0-beta.1" });
+  assert.equal(report.schemaVersion, 4);
+  assert.deepEqual(report.tool, { name: "privacyspec", version: "0.1.0-beta.2" });
   assert.equal(report.generatedAt, "2026-08-20T12:00:00.500Z");
   assert.equal(report.run.playwrightStatus, "passed");
   assert.equal(report.run.privacyspecStatus, "review");
@@ -135,10 +175,50 @@ test("schema-v1 JSON report records CI outcome, mappings, baseline state, and pe
     skipped: 0,
     interrupted: 0,
   });
+  assert.deepEqual(report.coverage.firstPartyJsonResponses.tests, {
+    enabled: 0,
+    disabled: 1,
+    unavailable: 0,
+  });
+  assert.deepEqual(report.coverage.playwright, {
+    tests: { compatible: 1, incompatible: 0, unavailable: 0 },
+    applicationContexts: 1,
+    pages: 1,
+  });
+  assert.deepEqual(report.coverage.network, {
+    requests: { seen: 0, accepted: 0, filteredLowValueStatic: 0 },
+  });
+  assert.equal(report.coverage.observation.status, "complete");
+  assert.deepEqual(report.coverage.observation.contexts, { seen: 1, instrumented: 1 });
+  assert.deepEqual(report.coverage.observation.pages, {
+    seen: 1,
+    instrumented: 1,
+    storageCapable: 1,
+  });
+  assert.equal(report.coverage.firstPartyJsonResponses.experimental, true);
+  assert.equal(report.testData.testDataSchemaVersion, 1);
+  assert.deepEqual(report.testData.summary, {
+    total: 0,
+    synthetic: 0,
+    reviewRequired: 0,
+    unassessed: 0,
+  });
   assert.equal(report.summary.sensitiveSources.byName["personal.email"], 1);
   assert.equal(report.summary.sinks.byName.network, 1);
   assert.equal(report.summary.dataFlows, 1);
   assert.equal(report.summary.findings.newReviewRequired, 1);
+  assert.equal(report.analysis.status, "review");
+  assert.deepEqual(report.analysis.changes, {
+    total: 1,
+    privacy: 1,
+    dependencies: 0,
+    security: 0,
+    runtimeErrors: 0,
+  });
+  assert.equal(report.analysis.privacy.status, "review");
+  assert.equal(report.analysis.dependencies.status, "pass");
+  assert.equal(report.analysis.security.status, "pass");
+  assert.equal(report.analysis.runtimeErrors.status, "pass");
   assert.equal(report.performance.suiteDurationMilliseconds, 500);
   assert.equal(report.performance.cumulativeTestDurationMilliseconds, 125);
   assert.equal(report.findings[0].baselineState, "new");
@@ -151,15 +231,164 @@ test("schema-v1 JSON report records CI outcome, mappings, baseline state, and pe
   assert.equal(serialized.includes(rawFixtureValue), false);
 
   const rendered = output.join("");
+  assert.match(rendered, /PrivacySpec Secondary Coverage/u);
+  assert.match(rendered, /Functional tests: PASS/u);
+  assert.match(rendered, /Observation coverage: COMPLETE \(contexts=1\/1, pages=1\/1/u);
+  assert.match(rendered, /Secondary coverage: REVIEW/u);
+  assert.match(rendered, /privacy\s+REVIEW \(coverage=COMPLETE, changes=1, flows=1\)/u);
+  assert.match(rendered, /dependencies\s+PASS/u);
   assert.match(rendered, /technical relevance PS1004: OWASP ASVS 5\.0\.0 V14\.2\.3/u);
   assert.match(rendered, /EU relevance PS1004: GDPR Article 5\(1\)\(c\)/u);
   assert.match(rendered, /authoritative sources PS1004: .*github\.com.*eur-lex/u);
   assert.match(rendered, /performance: suite=500ms, cumulative test duration=125ms/u);
-  assert.match(rendered, /JSON report: .*privacyspec-report\.json \(schema v1\)/u);
+  assert.match(rendered, /JSON report: .*privacyspec-report\.json \(schema v4\)/u);
   assert.match(
     rendered,
-    /result: REVIEW \(functional tests=PASS, technical failures=0, new review findings=1\)/u,
+    /result: REVIEW \(functional tests=PASS, changes=1, technical failures=0, review findings=1\)/u,
   );
+});
+
+test("bounded optional observer skips produce partial inconclusive coverage", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "privacyspec-partial-coverage-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const reportPath = join(directory, "privacyspec-report.json");
+  const output = [];
+  const result = createEmptyPrivacySpecResult();
+  result.coverage.firstPartyJsonResponses.enabled = true;
+  result.coverage.firstPartyJsonResponses.responses = {
+    seen: 1,
+    firstParty: 1,
+    json: 1,
+    parsed: 0,
+    withSources: 0,
+  };
+  result.coverage.firstPartyJsonResponses.skipped.unknownLength = 1;
+  const reporter = new PrivacySpecReporter({
+    baselinePath: false,
+    latestRunPath: false,
+    reportPath,
+    write: (message) => output.push(message),
+  });
+  reporter.onBegin({ projects: [{ name: "chromium" }] });
+  reporter.onTestEnd(
+    testCase,
+    testResult(
+      completeAttachments({
+        name: PRIVACYSPEC_ATTACHMENT_NAME,
+        contentType: PRIVACYSPEC_ATTACHMENT_CONTENT_TYPE,
+        body: Buffer.from(JSON.stringify(result)),
+      }),
+    ),
+  );
+
+  assert.equal(await reporter.onEnd(fullResult()), undefined);
+  const report = JSON.parse(await readFile(reportPath, "utf8"));
+  assert.equal(report.run.complete, false);
+  assert.equal(report.run.privacyspecStatus, "incomplete");
+  assert.equal(report.coverage.observation.status, "partial");
+  assert.deepEqual(report.coverage.observation.diagnostics, [
+    {
+      code: "COVERAGE_OPTIONAL_OBSERVER_SKIPPED",
+      message: "The optional first-party JSON response observer skipped bounded work.",
+    },
+  ]);
+  assert.match(output.join(""), /Observation coverage: PARTIAL/u);
+  assert.match(output.join(""), /Secondary coverage: INCONCLUSIVE/u);
+});
+
+test("observer finalization timeout makes coverage incomplete", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "privacyspec-finalization-timeout-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const reportPath = join(directory, "privacyspec-report.json");
+  const output = [];
+  const reporter = new PrivacySpecReporter({
+    baselinePath: false,
+    latestRunPath: false,
+    reportPath,
+    write: (message) => output.push(message),
+  });
+  reporter.onBegin({ projects: [{ name: "chromium" }] });
+  reporter.onTestEnd(
+    testCase,
+    testResult(
+      completeAttachments(
+        attachmentWith({
+          kind: "diagnostic",
+          code: "PS_OBSERVER_FINALIZATION_TIMEOUT",
+          classification: "informational",
+          message:
+            "Observer finalization exceeded its bounded wait before the event set was complete.",
+        }),
+      ),
+    ),
+  );
+
+  assert.equal(await reporter.onEnd(fullResult()), undefined);
+  const report = JSON.parse(await readFile(reportPath, "utf8"));
+  assert.equal(report.run.complete, false);
+  assert.equal(report.run.privacyspecStatus, "incomplete");
+  assert.equal(report.coverage.observation.status, "incomplete");
+  assert.deepEqual(await readPrivacySpecReport(reportPath), report);
+  assert.equal(
+    report.coverage.observation.diagnostics.some(
+      (diagnostic) => diagnostic.code === "COVERAGE_OBSERVER_FINALIZATION_INCOMPLETE",
+    ),
+    true,
+  );
+  assert.match(output.join(""), /Observation coverage: INCOMPLETE/u);
+  assert.match(output.join(""), /Secondary coverage: INCONCLUSIVE/u);
+});
+
+test("schema-v4 report persists only sanitized test-data hygiene semantics", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "privacyspec-testdata-report-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const reportPath = join(directory, "privacyspec-report.json");
+  const rawValue = "private@phase16-report.dev";
+  const result = createEmptyPrivacySpecResult();
+  result.testData.observations.push({
+    verdict: "REVIEW_REQUIRED",
+    signal: "EMAIL_DOMAIN_NOT_RECOGNIZED_AS_SYNTHETIC",
+    category: "personal.email",
+    sourceKind: "form-input",
+    attribution: {
+      test: {
+        file: "tests/customer.spec.ts",
+        title: "customer can be created",
+        project: "chromium",
+      },
+      control: { elementKind: "input", observedBy: "event" },
+    },
+  });
+  const reporter = new PrivacySpecReporter({
+    baselinePath: false,
+    latestRunPath: false,
+    reportPath,
+    write: () => {},
+  });
+  reporter.onBegin({ projects: [{ name: "chromium" }] });
+  reporter.onTestEnd(
+    testCase,
+    testResult(
+      completeAttachments({
+        name: PRIVACYSPEC_ATTACHMENT_NAME,
+        contentType: PRIVACYSPEC_ATTACHMENT_CONTENT_TYPE,
+        body: Buffer.from(JSON.stringify(result)),
+      }),
+    ),
+  );
+  assert.equal(await reporter.onEnd(fullResult()), undefined);
+  const serialized = await readFile(reportPath, "utf8");
+  const report = JSON.parse(serialized);
+  assert.deepEqual(report.testData.summary, {
+    total: 1,
+    synthetic: 0,
+    reviewRequired: 1,
+    unassessed: 0,
+  });
+  assert.equal(report.run.privacyspecStatus, "passed");
+  assert.equal(serialized.includes(rawValue), false);
+  assert.equal(serialized.includes("phase16-report.dev"), false);
+  assert.doesNotMatch(serialized, /"(?:raw|value|domain)"\s*:/u);
 });
 
 test("a non-passing functional run is reported as incomplete without replacing its exit status", async (t) => {
@@ -174,7 +403,7 @@ test("a non-passing functional run is reported as incomplete without replacing i
     write: (message) => output.push(message),
   });
   reporter.onBegin({ projects: [{ name: "chromium" }] });
-  reporter.onTestEnd(testCase, testResult([attachmentWith()], "failed", 75));
+  reporter.onTestEnd(testCase, testResult(completeAttachments(attachmentWith()), "failed", 75));
 
   assert.equal(await reporter.onEnd(fullResult("failed", 200)), undefined);
   const report = JSON.parse(await readFile(reportPath, "utf8"));
@@ -203,7 +432,7 @@ test("a JSON report write failure is a PrivacySpec integration failure", async (
   reporter.onBegin({ projects: [] });
   await rm(reportPath, { force: true });
   await mkdir(reportPath);
-  reporter.onTestEnd(testCase, testResult([attachmentWith()]));
+  reporter.onTestEnd(testCase, testResult(completeAttachments(attachmentWith())));
 
   assert.deepEqual(await reporter.onEnd(fullResult()), { status: "failed" });
   assert.match(output.join(""), /could not write JSON report/u);
