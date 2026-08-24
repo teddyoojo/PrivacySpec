@@ -5,6 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "@playwright/test";
 
 import { createRedactionValues } from "../dist/correlate/transforms.js";
+import { normalizeCustomDomSourceClassifiers } from "../dist/discovery/custom-classifiers.js";
 import { sanitizeSensitiveSources } from "../dist/discovery/sanitize-sources.js";
 import { SensitiveValueRegistry } from "../dist/discovery/sensitive-registry.js";
 import {
@@ -42,6 +43,23 @@ test("real Chromium captures event sources and end-of-test fallback without pers
       <input id="password" name="password" type="password" autocomplete="current-password">
       <label for="fallback">Recovery email</label>
       <input id="fallback" name="recoveryEmail" type="email" autocomplete="email">
+      <label for="name">Full name</label>
+      <input id="name" type="text" autocomplete="name">
+      <label for="address">Street address</label>
+      <textarea id="address" autocomplete="street-address"></textarea>
+      <label for="birth-date">Date of birth</label>
+      <input id="birth-date" type="date" autocomplete="bday">
+      <label for="account-id">Customer ID</label>
+      <input id="account-id" name="customerId" type="text">
+      <label for="card-number">Card number</label>
+      <input id="card-number" type="text" autocomplete="cc-number">
+      <label for="gender">Gender identity</label>
+      <select id="gender" autocomplete="sex">
+        <option value="">Choose</option>
+        <option value="Nonbinary">Nonbinary</option>
+      </select>
+      <label for="job-title">Job title</label>
+      <input id="job-title" type="text" autocomplete="organization-title">
       <label for="ordinary">Search</label>
       <input id="ordinary" name="query" type="text">
     `;
@@ -51,9 +69,23 @@ test("real Chromium captures event sources and end-of-test fallback without pers
     const phone = ["+49", "170", "0000000"].join("");
     const password = ["phase", "four", "credential"].join("-");
     const fallbackEmail = ["fallback", "example.test"].join("@");
+    const fullName = ["Casey", "Example"].join(" ");
+    const address = ["123", "Fixture", "Avenue"].join(" ");
+    const birthDate = ["1990", "01", "02"].join("-");
+    const accountId = ["customer", "fixture", "42"].join("-");
+    const cardNumber = ["4242", "4242", "4242", "4242"].join(" ");
+    const genderIdentity = "Nonbinary";
+    const jobTitle = "Software Engineer";
     await page.locator("#email").fill(email);
     await page.locator("#phone").fill(phone);
     await page.locator("#password").fill(password);
+    await page.locator("#name").fill(fullName);
+    await page.locator("#address").fill(address);
+    await page.locator("#birth-date").fill(birthDate);
+    await page.locator("#account-id").fill(accountId);
+    await page.locator("#card-number").fill(cardNumber);
+    await page.locator("#gender").selectOption(genderIdentity);
+    await page.locator("#job-title").fill(jobTitle);
     await page.locator("#ordinary").fill("ordinary search text");
     await page.locator("#fallback").evaluate((control, value) => {
       if (control instanceof HTMLInputElement) control.value = String(value);
@@ -90,9 +122,16 @@ test("real Chromium captures event sources and end-of-test fallback without pers
     const sources = observations.filter((observation) => observation.kind === "sensitive-source");
 
     assert.deepEqual(sources.map((source) => source.category).sort(), [
+      "personal.account_identifier",
+      "personal.date_of_birth",
       "personal.email",
       "personal.email",
+      "personal.gender_identity",
+      "personal.job_title",
+      "personal.name",
+      "personal.payment_card",
       "personal.phone",
+      "personal.postal_address",
       "secret.password",
     ]);
     assert.equal(
@@ -109,9 +148,95 @@ test("real Chromium captures event sources and end-of-test fallback without pers
     );
 
     const serialized = JSON.stringify(observations);
-    for (const raw of [email, phone, password, fallbackEmail]) {
+    for (const raw of [
+      email,
+      phone,
+      password,
+      fallbackEmail,
+      fullName,
+      address,
+      birthDate,
+      accountId,
+      cardNumber,
+      genderIdentity,
+      jobTitle,
+    ]) {
       assert.equal(serialized.includes(raw), false);
     }
+  } finally {
+    registry.dispose();
+    await context.close();
+    await browser.close();
+  }
+});
+
+test("real Chromium applies declarative custom classifiers without persisting configured or raw values", async () => {
+  const classifiers = normalizeCustomDomSourceClassifiers([
+    {
+      category: {
+        id: "custom.personal.acme.benefit_code",
+        family: "personal",
+      },
+      sourceSurface: "dom-control",
+      confidence: "high",
+      sanitization: "bounded-control-metadata",
+      match: {
+        kind: "corroborated",
+        alternatives: [
+          {
+            machine: { field: "name", equals: "benefitCode" },
+            accessible: { field: "associatedLabel", equals: "Benefit Code" },
+          },
+        ],
+      },
+      value: { minLength: 6, maxLength: 64 },
+    },
+  ]);
+  const browser = await chromium.launch();
+  const context = await browser.newContext();
+  const registry = new SensitiveValueRegistry(classifiers);
+
+  try {
+    await context.exposeBinding(SOURCE_STREAM_BINDING, (_source, event) => {
+      registry.recordStreamEvent(event);
+    });
+    await context.addInitScript({
+      content: createBrowserObserverScript(registry.streamToken, classifiers),
+    });
+    const page = await context.newPage();
+    const markup = `
+      <label for="benefit">Benefit Code</label>
+      <input id="benefit" name="benefitCode" type="text">
+    `;
+    await page.goto(`data:text/html,${encodeURIComponent(markup)}`);
+
+    const rawValue = ["benefit", "fixture", "42"].join("-");
+    await page.locator("#benefit").fill(rawValue);
+    await waitForSource(registry);
+
+    const collected = await collectSensitiveSources(context);
+    for (const source of collected.sources) registry.add(source);
+    if (collected.customClassificationAmbiguous) {
+      registry.markCustomClassificationAmbiguous();
+    }
+    const snapshot = registry.snapshot();
+    const observations = sanitizeSensitiveSources(
+      snapshot.sources,
+      snapshot.limitReached || collected.limitReached,
+      snapshot.customClassificationAmbiguous,
+    );
+    const sources = observations.filter((observation) => observation.kind === "sensitive-source");
+
+    assert.equal(sources.length, 1);
+    assert.equal(sources[0]?.category, "custom.personal.acme.benefit_code");
+    assert.equal(sources[0]?.confidence, "high");
+    assert.equal(sources[0]?.control.name, "benefitCode");
+    assert.equal(sources[0]?.control.associatedLabel, "Benefit Code");
+
+    const serialized = JSON.stringify(observations);
+    assert.equal(serialized.includes(rawValue), false);
+    assert.equal(serialized.includes("benefit fixture 42"), false);
+    assert.equal(serialized.includes("custom.personal.acme.benefit_code"), true);
   } finally {
     registry.dispose();
     await context.close();

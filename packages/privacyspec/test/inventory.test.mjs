@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,11 @@ import { compareBaseline, createBaselineFlowCandidate } from "../dist/baseline/c
 import { createBaselineFile } from "../dist/baseline/write.js";
 import { createPrivacyInventory } from "../dist/inventory/create.js";
 import { INVENTORY_SCHEMA_VERSION } from "../dist/inventory/model.js";
+import {
+  InventoryFormatError,
+  parsePrivacyInventory,
+  readPrivacyInventoryFile,
+} from "../dist/inventory/read.js";
 import {
   renderInventoryCsv,
   renderInventoryMarkdown,
@@ -23,6 +28,7 @@ import {
   parsePrivacySpecReportV2,
   parsePrivacySpecReportV3,
   parsePrivacySpecReportV4,
+  parsePrivacySpecReportV5,
   ReportFormatError,
   readPrivacySpecReport,
 } from "../dist/report/read.js";
@@ -37,6 +43,7 @@ const flow = (overrides = {}) => ({
   sourceKind: "form-input",
   sourceConfidence: "high",
   sinkKind: "request-body",
+  requestSurface: "browser",
   recipient: {
     origin: "https://app.example.test",
     host: "app.example.test",
@@ -145,11 +152,30 @@ const asSchemaV1 = (report) => {
     testData: _testData,
     ...common
   } = structuredClone(report);
-  return { ...common, schemaVersion: 1 };
+  const copy = { ...common, schemaVersion: 1 };
+  removeRequestSurfaces(copy);
+  return copy;
+};
+
+const removeRequestSurfaces = (report) => {
+  for (const observedFlow of report.flows) delete observedFlow.requestSurface;
+  for (const entry of report.findings) delete entry.finding.flow.requestSurface;
+  for (const group of [...report.baseline.known, ...report.baseline.new]) {
+    for (const finding of group.findings) delete finding.flow.requestSurface;
+  }
+  return report;
+};
+
+const asSchemaV4 = (report) => {
+  const copy = structuredClone(report);
+  copy.schemaVersion = 4;
+  delete copy.coverage.browserEngines;
+  delete copy.coverage.apiRequests;
+  return removeRequestSurfaces(copy);
 };
 
 const asSchemaV2 = (report) => {
-  const copy = structuredClone(report);
+  const copy = asSchemaV4(report);
   copy.schemaVersion = 2;
   delete copy.coverage.observation;
   delete copy.analysis;
@@ -157,13 +183,13 @@ const asSchemaV2 = (report) => {
 };
 
 const asSchemaV3 = (report) => {
-  const copy = structuredClone(report);
+  const copy = asSchemaV4(report);
   copy.schemaVersion = 3;
   delete copy.analysis;
   return copy;
 };
 
-test("strict union report reader accepts schema v1/v2/v3/v4 and rejects malformed input", async (context) => {
+test("strict union report reader accepts schema v1/v2/v3/v4/v5 and rejects malformed input", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "privacyspec-report-read-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const path = join(directory, "report.json");
@@ -172,9 +198,14 @@ test("strict union report reader accepts schema v1/v2/v3/v4 and rejects malforme
   const reportV1 = asSchemaV1(report);
   const reportV2 = asSchemaV2(report);
   const reportV3 = asSchemaV3(report);
+  const reportV4 = asSchemaV4(report);
 
   assert.deepEqual(await readPrivacySpecReport(path), report);
-  assert.deepEqual(parsePrivacySpecReportV4(structuredClone(report)), report);
+  const symlinkPath = join(directory, "report-link.json");
+  await symlink(path, symlinkPath);
+  await assert.rejects(readPrivacySpecReport(symlinkPath), /bounded regular file/u);
+  assert.deepEqual(parsePrivacySpecReportV5(structuredClone(report)), report);
+  assert.deepEqual(parsePrivacySpecReportV4(structuredClone(reportV4)), reportV4);
   assert.deepEqual(parsePrivacySpecReport(structuredClone(report)), report);
   assert.deepEqual(parsePrivacySpecReportV3(structuredClone(reportV3)), reportV3);
   assert.deepEqual(parsePrivacySpecReportV2(structuredClone(reportV2)), reportV2);
@@ -192,7 +223,7 @@ test("strict union report reader accepts schema v1/v2/v3/v4 and rejects malforme
   );
 
   for (const malformed of [
-    { ...structuredClone(report), schemaVersion: 5 },
+    { ...structuredClone(report), schemaVersion: 6 },
     { ...structuredClone(report), unexpected: true },
     {
       ...structuredClone(report),
@@ -281,7 +312,7 @@ test("current inventory preserves response provenance while schema v1 rejects it
   report.summary.dataFlows += 1;
   report.analysis.privacy.summary.dataFlows += 1;
 
-  const parsed = parsePrivacySpecReportV4(report);
+  const parsed = parsePrivacySpecReportV5(report);
   const inventory = createPrivacyInventory(parsed);
   const entry = inventory.entries.find((candidate) =>
     candidate.sourceKinds.includes("response-json"),
@@ -338,6 +369,38 @@ test("inventory aggregates occurrences and assigns technical, baseline, and chan
   assert.match(inventory.limitations.join(" "), /not a complete record of processing/u);
 });
 
+test("inventory preserves every expanded DOM category", () => {
+  const categories = [
+    "personal.name",
+    "personal.postal_address",
+    "personal.date_of_birth",
+    "personal.account_identifier",
+    "personal.payment_card",
+    "personal.gender_identity",
+    "personal.job_title",
+  ];
+  const report = createReport();
+  for (const category of categories) {
+    report.flows.push(
+      flow({
+        dataCategory: category,
+        endpoint: `/profile/${category.replaceAll(".", "-")}`,
+        location: `json.${category.replaceAll(".", "_")}`,
+      }),
+    );
+  }
+
+  const inventory = createPrivacyInventory(report);
+  const expanded = inventory.entries
+    .filter((entry) => categories.includes(entry.dataCategory))
+    .map((entry) => entry.dataCategory)
+    .toSorted();
+  assert.deepEqual(expanded, categories.toSorted());
+  const markdown = renderInventoryMarkdown(inventory);
+  for (const category of categories)
+    assert.match(markdown, new RegExp(category.replace(".", "\\."), "u"));
+});
+
 test("inventory associates findings by semantics rather than JSON property order", () => {
   const report = createReport();
   report.findings = report.findings.map((entry) => ({
@@ -378,6 +441,20 @@ test("inventory normalizes dynamic endpoint segments before aggregation", () => 
     (candidate) => candidate.endpoint === "/api/customers/:number",
   );
   assert.equal(entry?.occurrences, 2);
+});
+
+test("inventory keeps browser and API-request flow surfaces distinct", () => {
+  const report = createReport();
+  report.flows.push(flow({ requestSurface: "api-request" }));
+  report.summary.dataFlows += 1;
+
+  const entries = createPrivacyInventory(report).entries.filter(
+    (entry) => entry.endpoint === "/api/customers",
+  );
+  assert.deepEqual(entries.map((entry) => entry.requestSurface).toSorted(), [
+    "api-request",
+    "browser",
+  ]);
 });
 
 test("inventory labels baseline matches as known review without implying legal approval", () => {
@@ -425,7 +502,7 @@ test("inventory renderers are deterministic, machine-readable, and spreadsheet s
 
   assert.match(terminal, /Runtime Privacy Inventory/u);
   assert.match(terminal, /NEW_REVIEW \[NEW_CATEGORY\]/u);
-  assert.match(markdown, /\| personal\.email \| EXTERNAL/u);
+  assert.match(markdown, /\| personal\.email \| browser \| EXTERNAL/u);
   assert.match(csv, /HYPERLINK/u);
   assert.match(formulaCsv, /'=HYPERLINK/u);
   assert.deepEqual(JSON.parse(json), inventory);
@@ -505,6 +582,33 @@ test("terminal and Markdown distinguish semantic review decisions from inventory
   );
 });
 
+test("payment-card review findings remain baseline-eligible in inventory summaries", () => {
+  const report = createReport();
+  const paymentFlow = flow({
+    dataCategory: "personal.payment_card",
+    sinkKind: "external-request",
+    recipient: {
+      origin: "https://payments.example.test",
+      host: "payments.example.test",
+      firstParty: false,
+    },
+    endpoint: "/authorize",
+    location: "json.card",
+  });
+  const [finding] = evaluateDataFlows([paymentFlow]);
+  assert.equal(finding?.ruleId, "PS1004");
+  report.flows.push(paymentFlow);
+  report.findings.push({ baselineState: "new", finding });
+
+  const inventory = createPrivacyInventory(report);
+  const payment = inventory.entries.find((entry) => entry.dataCategory === "personal.payment_card");
+  assert.equal(payment?.state, "NEW_REVIEW");
+  assert.match(
+    renderInventoryTerminal(inventory),
+    /2 review decisions \/ 2 observed inventory rows/u,
+  );
+});
+
 test("inventory file output is atomic, private, and contains no raw payload field", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "privacyspec-inventory-write-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
@@ -515,4 +619,55 @@ test("inventory file output is atomic, private, and contains no raw payload fiel
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   assert.equal(await readFile(path, "utf8"), output);
   assert.equal(/"(?:raw|value|payload)"\s*:/u.test(output), false);
+});
+
+test("strict inventory reader accepts v1/v2 and rejects malformed object and file artifacts", async (context) => {
+  const current = createPrivacyInventory(createReport());
+  const legacy = structuredClone(current);
+  legacy.inventorySchemaVersion = 1;
+  delete legacy.experimentalCoverage;
+  for (const entry of legacy.entries) delete entry.requestSurface;
+
+  assert.deepEqual(parsePrivacyInventory(structuredClone(current)), current);
+  assert.deepEqual(parsePrivacyInventory(structuredClone(legacy)), legacy);
+  const cyclic = structuredClone(current);
+  cyclic.self = cyclic;
+  const accessor = structuredClone(current);
+  let getterCalls = 0;
+  Object.defineProperty(accessor, "entries", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return [];
+    },
+  });
+  for (const malformed of [
+    { ...structuredClone(current), inventorySchemaVersion: 3 },
+    { ...structuredClone(current), unknown: true },
+    {
+      ...structuredClone(current),
+      sourceReport: { ...current.sourceReport, unknown: true },
+    },
+    {
+      ...structuredClone(current),
+      summary: { ...current.summary, entries: current.summary.entries + 1 },
+    },
+    { ...structuredClone(current), entries: current.entries.toReversed() },
+    cyclic,
+    accessor,
+  ]) {
+    assert.throws(() => parsePrivacyInventory(malformed), InventoryFormatError);
+  }
+  assert.equal(getterCalls, 0);
+
+  const directory = await mkdtemp(join(tmpdir(), "privacyspec-inventory-read-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "inventory.json");
+  await writeFile(path, JSON.stringify(current), "utf8");
+  assert.deepEqual(await readPrivacyInventoryFile(path), current);
+  const linkPath = join(directory, "inventory-link.json");
+  await symlink(path, linkPath);
+  await assert.rejects(readPrivacyInventoryFile(linkPath), /bounded regular file/u);
+  await writeFile(path, "not-json", "utf8");
+  await assert.rejects(readPrivacyInventoryFile(path), /not valid JSON/u);
 });

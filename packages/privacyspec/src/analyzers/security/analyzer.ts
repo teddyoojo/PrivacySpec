@@ -142,7 +142,9 @@ const partialCoverage = (coverage: SecurityCoverageStatus): SecurityCoverageStat
 
 export class SecurityPostureAnalyzer implements Analyzer {
   readonly id = SECURITY_ANALYZER_ID;
-  readonly capabilities = Object.freeze({ required: ["response-headers", "cookies"] as const });
+  readonly capabilities = Object.freeze({
+    required: ["response-headers", "cookies", "browser-engine", "api-requests"] as const,
+  });
   readonly #entries = new Map<string, MutableSecurityEntry>();
   readonly #hasConfiguredFirstParty: boolean;
   #inferredFirstPartyOrigin: string | undefined;

@@ -157,7 +157,7 @@ test("semantic digest is stable across 25 lifecycle-order permutations", () => {
 
   assert.equal(digests.size, 1);
   assert.deepEqual(Array.from(digests), [
-    "0b79c2c3cb24e6e5dc859e6284695a4081000cff3bd9c40189b71497c116bb52",
+    "92b9abd77210e85dd2d5489ded3a2159e300d4d34d49982e05403306bc15110c",
   ]);
   assert.equal(representative.result.limitReached, false);
   assert.deepEqual(

@@ -71,6 +71,7 @@ const sanitizePage = (
 export const sanitizeSensitiveSources = (
   sources: RawSensitiveSource[],
   limitReached: boolean,
+  customClassificationAmbiguous = false,
 ): SourceObservation[] => {
   const sensitiveValues = createRedactionValues(sources);
   const observations: SourceObservation[] = [];
@@ -119,6 +120,15 @@ export const sanitizeSensitiveSources = (
       code: "PS_SOURCE_LIMIT_REACHED",
       classification: "informational",
       message: "Sensitive source collection reached its per-test safety limit.",
+    });
+  }
+
+  if (customClassificationAmbiguous) {
+    observations.push({
+      kind: "diagnostic",
+      code: "PS_CUSTOM_SOURCE_AMBIGUOUS",
+      classification: "informational",
+      message: "Multiple custom source categories matched a browser control.",
     });
   }
 

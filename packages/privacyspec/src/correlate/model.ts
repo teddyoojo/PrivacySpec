@@ -3,7 +3,7 @@ import type {
   ResponseSourceProvenance,
   SourceConfidence,
 } from "../discovery/source-model.js";
-import type { RawSink } from "../observe/sink-model.js";
+import type { RawSink, RequestSurface } from "../observe/sink-model.js";
 
 export type TransformKind =
   | "EXACT"
@@ -39,6 +39,7 @@ export interface FirstPartyConfig {
 
 export interface DataFlow {
   kind: "data-flow";
+  requestSurface: RequestSurface;
   dataCategory: RawSensitiveSource["category"];
   sourceKind: DataFlowSourceKind;
   sourceConfidence: SourceConfidence;

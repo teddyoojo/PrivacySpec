@@ -1,4 +1,5 @@
 import { canonicalizeEndpointPath } from "../correlate/redact.js";
+import { getDataCategoryFamily } from "../discovery/source-model.js";
 import type { Finding } from "../rules/model.js";
 import { namespacedAnalysisIdentity, PRIVACY_ANALYSIS_MODULE } from "../runtime/modules.js";
 import type {
@@ -35,7 +36,7 @@ const storageSinkKinds = new Set<BaselineFlowIdentity["sinkKind"]>([
 ]);
 
 export const isBaselineEligibleIdentity = (identity: BaselineFlowIdentity): boolean => {
-  if (!identity.dataCategory.startsWith("personal.")) return false;
+  if (getDataCategoryFamily(identity.dataCategory) !== "personal") return false;
   if (identity.ruleId === "PS1001") {
     return identity.sinkKind === "request-url" || identity.location?.startsWith("url.") === true;
   }

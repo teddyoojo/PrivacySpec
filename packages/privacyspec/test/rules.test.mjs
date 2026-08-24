@@ -10,6 +10,16 @@ const TEST_METADATA = {
   project: "chromium",
 };
 
+const EXPANDED_PERSONAL_CATEGORIES = [
+  "personal.name",
+  "personal.postal_address",
+  "personal.date_of_birth",
+  "personal.account_identifier",
+  "personal.payment_card",
+  "personal.gender_identity",
+  "personal.job_title",
+];
+
 const flow = (overrides = {}) => ({
   kind: "data-flow",
   dataCategory: "personal.email",
@@ -58,7 +68,7 @@ test("the Phase 7 registry exposes exactly the six stable technical rule IDs", (
   );
 });
 
-test("PS1001 distinguishes contextual personal data from secrets in URLs", () => {
+test("PS1001 distinguishes contextual personal/payment data from secrets in URLs", () => {
   const firstPartyUrl = flow({ sinkKind: "request-url", location: "url.query.email" });
   const phoneUrl = flow({
     dataCategory: "personal.phone",
@@ -70,6 +80,11 @@ test("PS1001 distinguishes contextual personal data from secrets in URLs", () =>
     sinkKind: "request-url",
     location: "url.query.password",
   });
+  const paymentUrl = flow({
+    dataCategory: "personal.payment_card",
+    sinkKind: "request-url",
+    location: "url.query.card",
+  });
   const externalUrl = flow({
     sinkKind: "external-request",
     location: "url.path",
@@ -80,8 +95,8 @@ test("PS1001 distinguishes contextual personal data from secrets in URLs", () =>
     },
   });
 
-  for (const personalFlow of [firstPartyUrl, phoneUrl]) {
-    const [finding] = evaluateDataFlows([personalFlow]);
+  for (const contextualFlow of [firstPartyUrl, phoneUrl, paymentUrl]) {
+    const [finding] = evaluateDataFlows([contextualFlow]);
     assert.equal(finding?.ruleId, "PS1001");
     assert.equal(finding?.severity, "warning");
     assert.equal(finding?.classification, "review_required");
@@ -100,6 +115,100 @@ test("PS1001 distinguishes contextual personal data from secrets in URLs", () =>
       flow({ sinkKind: "request-body", location: "json.email" }),
     ]),
     [],
+  );
+});
+
+test("custom category families inherit existing personal and secret rule semantics", () => {
+  const external = {
+    origin: "https://analytics.example.test",
+    host: "analytics.example.test",
+    firstParty: false,
+  };
+  const customPersonal = flow({
+    dataCategory: "custom.personal.acme.member_id",
+    sinkKind: "external-request",
+    recipient: external,
+    location: "json.memberId",
+  });
+  const customSecret = flow({
+    dataCategory: "custom.secret.acme.employee_pin",
+    sinkKind: "external-request",
+    recipient: external,
+    location: "json.employeePin",
+  });
+  assert.deepEqual(ruleIds([customPersonal]), ["PS1004"]);
+  assert.deepEqual(ruleIds([customSecret]), ["PS1003"]);
+  assert.deepEqual(
+    ruleIds([
+      {
+        ...customPersonal,
+        sinkKind: "request-url",
+        recipient: { ...customPersonal.recipient, firstParty: true },
+        location: "url.query.memberId",
+      },
+    ]),
+    ["PS1001"],
+  );
+  assert.deepEqual(
+    ruleIds([
+      {
+        ...customSecret,
+        sinkKind: "request-url",
+        recipient: { ...customSecret.recipient, firstParty: true },
+        location: "url.query.employeePin",
+      },
+    ]),
+    ["PS1001"],
+  );
+  assert.deepEqual(
+    ruleIds([
+      {
+        ...customPersonal,
+        sinkKind: "local-storage",
+        recipient: undefined,
+        method: undefined,
+        endpoint: undefined,
+      },
+    ]),
+    ["PS1005"],
+  );
+  assert.deepEqual(
+    ruleIds([
+      {
+        ...customSecret,
+        sinkKind: "local-storage",
+        recipient: undefined,
+        method: undefined,
+        endpoint: undefined,
+      },
+    ]),
+    [],
+  );
+  assert.deepEqual(
+    ruleIds([
+      {
+        ...customPersonal,
+        sinkKind: "console",
+        recipient: undefined,
+        method: undefined,
+        endpoint: undefined,
+        location: "console.argument",
+      },
+    ]),
+    ["PS1006"],
+  );
+  assert.deepEqual(
+    ruleIds([
+      {
+        ...customPersonal,
+        recipient: {
+          origin: "http://app.example.test",
+          host: "app.example.test",
+          firstParty: true,
+        },
+      },
+    ]),
+    ["PS1002"],
   );
 });
 
@@ -173,6 +282,15 @@ test("PS1004 creates contextual review findings for personal data sent externall
   assert.equal(finding?.severity, "warning");
   assert.equal(finding?.classification, "review_required");
   assert.match(finding?.limitations[0] ?? "", /cannot determine processor status/u);
+  assert.deepEqual(
+    ruleIds(
+      EXPANDED_PERSONAL_CATEGORIES.map((dataCategory) => ({
+        ...externalPersonal,
+        dataCategory,
+      })),
+    ),
+    EXPANDED_PERSONAL_CATEGORIES.map(() => "PS1004"),
+  );
   assert.deepEqual(ruleIds([flow(), { ...externalPersonal, dataCategory: "secret.password" }]), []);
 });
 
@@ -185,6 +303,18 @@ test("PS1005 distinguishes contextual personal-data storage from secret storage"
     assert.equal(finding?.severity, "warning", sinkKind);
     assert.equal(finding?.classification, "review_required", sinkKind);
   }
+
+  const [paymentFinding] = evaluateDataFlows([
+    flow({
+      dataCategory: "personal.payment_card",
+      sinkKind: "local-storage",
+      recipient: undefined,
+      method: undefined,
+      location: "payment-card",
+    }),
+  ]);
+  assert.equal(paymentFinding?.ruleId, "PS1005");
+  assert.equal(paymentFinding?.classification, "review_required");
 
   const [secretFinding] = evaluateDataFlows([
     flow({

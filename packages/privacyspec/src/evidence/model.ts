@@ -1,5 +1,7 @@
 import type { DataCategory } from "../discovery/source-model.js";
 import type {
+  APIRequestReportCoverage,
+  BrowserEngineReportCoverage,
   FirstPartyJsonResponseReportCoverage,
   PrivacySpecRunStatus,
   TestAttemptCounts,
@@ -7,7 +9,8 @@ import type {
 import type { RegulatoryMapping, TechnicalControlMapping } from "../rules/legal-map.js";
 import type { RuleId } from "../rules/model.js";
 
-export const EVIDENCE_SCHEMA_VERSION = 1 as const;
+export const EVIDENCE_SCHEMA_VERSION = 2 as const;
+export const EVIDENCE_SCHEMA_VERSION_V1 = 1 as const;
 
 export type EvidenceFormat = "json" | "markdown";
 export type EvidenceSourceRunState = "COMPLETE" | "INCOMPLETE";
@@ -70,7 +73,7 @@ export interface PrivacySpecEvidence {
     evidenceGeneratedAt: string;
     sourceRunStartedAt: string;
     sourceReportGeneratedAt: string;
-    sourceReportSchemaVersion: 1 | 2 | 3 | 4;
+    sourceReportSchemaVersion: 1 | 2 | 3 | 4 | 5;
     sourceRunState: EvidenceSourceRunState;
     sourceStatus: PrivacySpecRunStatus;
   };
@@ -86,6 +89,10 @@ export interface PrivacySpecEvidence {
     externalRecipients: EvidenceExternalRecipientObservation[];
     rules: EvidenceRuleObservation[];
     dataFlowOccurrences: number;
+    requestSurfaces: {
+      browser: number;
+      apiRequest: number;
+    };
     findingOccurrences: {
       technicalFailures: number;
       reviewRequired: number;
@@ -114,6 +121,10 @@ export interface PrivacySpecEvidence {
           available: true;
           details: FirstPartyJsonResponseReportCoverage;
         };
+    browserEngines:
+      | { available: false }
+      | { available: true; details: BrowserEngineReportCoverage };
+    apiRequests: { available: false } | { available: true; details: APIRequestReportCoverage };
   };
   technicalRelevance: EvidenceTechnicalRelevance[];
   regulatoryRelevance: {
@@ -125,3 +136,12 @@ export interface PrivacySpecEvidence {
     legal: string[];
   };
 }
+
+export interface PrivacySpecEvidenceV1
+  extends Omit<PrivacySpecEvidence, "evidenceSchemaVersion" | "observations" | "coverage"> {
+  evidenceSchemaVersion: typeof EVIDENCE_SCHEMA_VERSION_V1;
+  observations: Omit<PrivacySpecEvidence["observations"], "requestSurfaces">;
+  coverage: Omit<PrivacySpecEvidence["coverage"], "browserEngines" | "apiRequests">;
+}
+
+export type ReadablePrivacySpecEvidence = PrivacySpecEvidenceV1 | PrivacySpecEvidence;

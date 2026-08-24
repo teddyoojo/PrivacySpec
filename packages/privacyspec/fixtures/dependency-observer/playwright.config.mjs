@@ -1,6 +1,14 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "@playwright/test";
 
+const runScope = process.env.PRIVACYSPEC_RUN_ID
+  ? {
+      runId: process.env.PRIVACYSPEC_RUN_ID,
+      configurationId: process.env.PRIVACYSPEC_CONFIGURATION_ID || "dependency-observer-v1",
+      outputDirectory: process.env.PRIVACYSPEC_RUN_PARTS_DIRECTORY,
+    }
+  : undefined;
+
 export default defineConfig({
   testDir: fileURLToPath(new URL(".", import.meta.url)),
   testMatch: "dependency.spec.mjs",
@@ -11,6 +19,7 @@ export default defineConfig({
     [
       fileURLToPath(new URL("../../dist/playwright/reporter.js", import.meta.url)),
       {
+        ...(runScope === undefined ? {} : { runScope }),
         baselinePath: false,
         latestRunPath: false,
         reportPath: false,

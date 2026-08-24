@@ -13,6 +13,8 @@ import {
   normalizeBaselineEndpoint,
 } from "../dist/baseline/compare.js";
 import {
+  classifierConfigurationForBaseline,
+  classifierConfigurationForLatestRun,
   createBaselineFile,
   createLatestRunFile,
   LatestRunIncompleteError,
@@ -123,6 +125,34 @@ test("semantic keys normalize dynamic paths and exclude test, method, and source
   }
 });
 
+test("strict privacy baselines accept bounded custom categories and reject near misses", () => {
+  const custom = candidate(
+    reviewFinding({
+      dataCategory: "custom.personal.acme.member_id",
+      location: "json.memberId",
+    }),
+  );
+  const parsed = parseBaselineFile({
+    schemaVersion: 1,
+    createdAt: CREATED_AT,
+    flows: [{ ...custom, status: "accepted" }],
+  });
+  assert.equal(parsed.flows[0]?.dataCategory, "custom.personal.acme.member_id");
+  assert.throws(() =>
+    parseBaselineFile({
+      schemaVersion: 1,
+      createdAt: CREATED_AT,
+      flows: [
+        {
+          ...custom,
+          dataCategory: "custom.personal.Acme.member_id",
+          status: "accepted",
+        },
+      ],
+    }),
+  );
+});
+
 test("new review flows receive deterministic semantic change reasons", () => {
   const existing = candidate();
 
@@ -206,6 +236,28 @@ test("comparison groups review findings by semantic key and classifies known, ne
     comparison.observed.map(({ key }) => key),
     comparison.observed.map(({ key }) => key).toSorted(),
   );
+});
+
+test("category identity changes remain visible across custom and built-in classification", () => {
+  const customFinding = reviewFinding({
+    dataCategory: "custom.personal.acme.member_id",
+    location: "json.memberId",
+  });
+  const builtInFinding = reviewFinding({
+    dataCategory: "personal.account_identifier",
+    location: "json.memberId",
+  });
+  const baseline = createBaselineFile([candidate(customFinding)], {
+    createdAt: CREATED_AT,
+    classifierConfiguration: { mode: "custom", id: "acme-member-classifier-v1" },
+  });
+
+  const comparison = compareBaseline([builtInFinding], baseline);
+  assert.equal(comparison.known.length, 0);
+  assert.equal(comparison.new.length, 1);
+  assert.equal(comparison.new[0]?.flow.dataCategory, "personal.account_identifier");
+  assert.equal(comparison.resolved.length, 1);
+  assert.equal(comparison.resolved[0]?.dataCategory, "custom.personal.acme.member_id");
 });
 
 test("only contextual personal-data review semantics can become baseline candidates", () => {
@@ -319,7 +371,7 @@ test("baseline schemas reject unknown fields, non-canonical keys, duplicates, an
   const baseline = createBaselineFile([flow], { createdAt: CREATED_AT });
   const latestRun = createLatestRunFile([flow], { complete: true, createdAt: CREATED_AT });
 
-  assert.throws(() => parseBaselineFile({ ...baseline, schemaVersion: 2 }), /schema/u);
+  assert.throws(() => parseBaselineFile({ ...baseline, schemaVersion: 3 }), /schema/u);
   assert.throws(() => parseBaselineFile({ ...baseline, unexpected: true }), /schema/u);
   assert.throws(
     () =>
@@ -337,6 +389,131 @@ test("baseline schemas reject unknown fields, non-canonical keys, duplicates, an
     () =>
       parseLatestRunFile({ ...latestRun, flows: [{ ...latestRun.flows[0], status: "accepted" }] }),
     /flow entries/u,
+  );
+});
+
+test("privacy baseline and latest-run v1/v2 classifier migrations fail closed", () => {
+  const builtIn = candidate();
+  const custom = candidate(
+    reviewFinding({
+      dataCategory: "custom.personal.acme.member_id",
+      location: "json.memberId",
+    }),
+  );
+  const legacyBuiltInBaseline = parseBaselineFile({
+    schemaVersion: 1,
+    createdAt: CREATED_AT,
+    flows: [accepted(builtIn)],
+  });
+  const legacyCustomBaseline = parseBaselineFile({
+    schemaVersion: 1,
+    createdAt: CREATED_AT,
+    flows: [accepted(custom)],
+  });
+  const legacyBuiltInLatest = parseLatestRunFile({
+    schemaVersion: 1,
+    createdAt: CREATED_AT,
+    complete: true,
+    flows: [builtIn],
+  });
+  const legacyCustomLatest = parseLatestRunFile({
+    schemaVersion: 1,
+    createdAt: CREATED_AT,
+    complete: true,
+    flows: [custom],
+  });
+
+  assert.deepEqual(classifierConfigurationForBaseline(legacyBuiltInBaseline), {
+    mode: "builtin-only",
+  });
+  assert.deepEqual(classifierConfigurationForLatestRun(legacyBuiltInLatest), {
+    mode: "builtin-only",
+  });
+  assert.deepEqual(classifierConfigurationForBaseline(legacyCustomBaseline), {
+    mode: "unavailable",
+  });
+  assert.deepEqual(classifierConfigurationForLatestRun(legacyCustomLatest), {
+    mode: "unavailable",
+  });
+
+  const currentCustomBaseline = createBaselineFile([custom], {
+    createdAt: CREATED_AT,
+    classifierConfiguration: { mode: "custom", id: "acme-classifiers-v2" },
+  });
+  const currentCustomLatest = createLatestRunFile([custom], {
+    complete: true,
+    createdAt: CREATED_AT,
+    classifierConfiguration: { mode: "custom", id: "acme-classifiers-v2" },
+  });
+  assert.deepEqual(parseBaselineFile(currentCustomBaseline), currentCustomBaseline);
+  assert.deepEqual(parseLatestRunFile(currentCustomLatest), currentCustomLatest);
+
+  assert.throws(
+    () =>
+      parseBaselineFile({
+        ...currentCustomBaseline,
+        classifierConfiguration: { mode: "builtin-only" },
+      }),
+    /classifier configuration/u,
+  );
+  assert.throws(
+    () =>
+      parseBaselineFile({
+        ...currentCustomBaseline,
+        classifierConfiguration: { mode: "unavailable" },
+      }),
+    /classifier configuration/u,
+  );
+  assert.throws(
+    () =>
+      parseLatestRunFile({
+        ...currentCustomLatest,
+        classifierConfiguration: { mode: "unavailable" },
+      }),
+    /classifier configuration/u,
+  );
+  assert.equal(
+    parseLatestRunFile({
+      ...currentCustomLatest,
+      complete: false,
+      classifierConfiguration: { mode: "unavailable" },
+    }).complete,
+    false,
+  );
+});
+
+test("baseline schema accepts expanded contextual DOM categories", () => {
+  const categories = [
+    "personal.name",
+    "personal.postal_address",
+    "personal.date_of_birth",
+    "personal.account_identifier",
+    "personal.payment_card",
+    "personal.gender_identity",
+    "personal.job_title",
+  ];
+  const flows = categories.map((dataCategory) =>
+    candidate(
+      reviewFinding({
+        dataCategory,
+        location: `json.${dataCategory.replaceAll(".", "_")}`,
+      }),
+    ),
+  );
+  const baseline = createBaselineFile(flows, { createdAt: CREATED_AT });
+  const latestRun = createLatestRunFile(flows, { complete: true, createdAt: CREATED_AT });
+
+  assert.deepEqual(
+    parseBaselineFile(baseline)
+      .flows.map((flow) => flow.dataCategory)
+      .toSorted(),
+    categories.toSorted(),
+  );
+  assert.deepEqual(
+    parseLatestRunFile(latestRun)
+      .flows.map((flow) => flow.dataCategory)
+      .toSorted(),
+    categories.toSorted(),
   );
 });
 

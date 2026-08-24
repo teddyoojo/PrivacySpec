@@ -223,7 +223,7 @@ const partialCoverage = (coverage: RuntimeFailureCoverageStatus): RuntimeFailure
 export class RuntimeFailureAnalyzer implements Analyzer {
   readonly id = RUNTIME_FAILURE_ANALYZER_ID;
   readonly capabilities = Object.freeze({
-    required: ["network", "console", "page-errors"] as const,
+    required: ["network", "console", "page-errors", "browser-engine", "api-requests"] as const,
   });
   readonly #entries = new Map<string, MutableRuntimeFailureEntry>();
   readonly #hasConfiguredFirstParty: boolean;

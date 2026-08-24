@@ -88,7 +88,9 @@ export const sanitizeDependencyTestReference = (test: {
 
 export class DependencyRuntimeAnalyzer implements Analyzer {
   readonly id = DEPENDENCY_ANALYZER_ID;
-  readonly capabilities = Object.freeze({ required: ["network"] as const });
+  readonly capabilities = Object.freeze({
+    required: ["network", "browser-engine", "api-requests"] as const,
+  });
   readonly #entries = new Map<string, MutableDependencyEntry>();
   readonly #hasConfiguredFirstParty: boolean;
   #inferredFirstPartyOrigin: string | undefined;

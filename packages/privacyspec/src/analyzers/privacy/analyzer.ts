@@ -1,5 +1,6 @@
 import { correlateSensitiveData, MAX_PAGE_URLS_PER_TEST } from "../../correlate/match.js";
 import type { FirstPartyConfig } from "../../correlate/model.js";
+import type { NormalizedCustomDomSourceClassifier } from "../../discovery/custom-classifiers.js";
 import { sanitizeSensitiveSources } from "../../discovery/sanitize-sources.js";
 import {
   type SensitiveSourceAddResult,
@@ -23,6 +24,7 @@ export interface PrivacyAnalyzerOptions {
   firstParty: FirstPartyConfig;
   allowInsecureOrigins?: readonly string[] | undefined;
   syntheticEmailDomains: readonly string[];
+  customClassifiers?: readonly NormalizedCustomDomSourceClassifier[] | undefined;
 }
 
 export interface PrivacyAnalyzerEventResult {
@@ -61,14 +63,18 @@ export class PrivacyRuntimeAnalyzer implements Analyzer {
       "cookies",
       "custom-contexts",
       "sensitive-sources",
+      "browser-engine",
+      "api-requests",
     ] as const,
     optional: ["responses", "response-bodies"] as const,
   });
-  readonly #sources = new SensitiveValueRegistry();
+  readonly #sources: SensitiveValueRegistry;
   readonly #sinks = new SinkRunRegistry();
   readonly #pageUrls: string[] = [];
 
-  constructor(private readonly options: PrivacyAnalyzerOptions) {}
+  constructor(private readonly options: PrivacyAnalyzerOptions) {
+    this.#sources = new SensitiveValueRegistry(options.customClassifiers);
+  }
 
   hasSensitiveSources(): boolean {
     return this.#sources.hasSources();
@@ -113,6 +119,9 @@ export class PrivacyRuntimeAnalyzer implements Analyzer {
       case "sensitive-source-limit":
         this.#sources.markLimitReached();
         return undefined;
+      case "sensitive-source-ambiguous":
+        this.#sources.markCustomClassificationAmbiguous();
+        return undefined;
       case "context-created":
       case "page-created":
       case "navigation":
@@ -148,7 +157,11 @@ export class PrivacyRuntimeAnalyzer implements Analyzer {
       allowInsecureOrigins: this.options.allowInsecureOrigins,
     });
     const observations: PrivacySpecObservation[] = [
-      ...sanitizeSensitiveSources(sourceSnapshot.sources, sourceSnapshot.limitReached),
+      ...sanitizeSensitiveSources(
+        sourceSnapshot.sources,
+        sourceSnapshot.limitReached,
+        sourceSnapshot.customClassificationAmbiguous,
+      ),
       ...sanitizeSinkSnapshot(sinkSnapshot, sourceSnapshot.sources),
       ...correlation.flows,
       ...findings,
@@ -163,6 +176,7 @@ export class PrivacyRuntimeAnalyzer implements Analyzer {
     }
     const reachedLimit =
       sourceSnapshot.limitReached ||
+      sourceSnapshot.customClassificationAmbiguous ||
       sinkSnapshot.limitsReached.length > 0 ||
       correlation.limitReached;
     const result: PrivacyAnalyzerTestResult = {

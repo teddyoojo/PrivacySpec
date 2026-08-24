@@ -48,6 +48,7 @@ const sanitizeNetwork = (sink: RawNetworkSink, variants: string[]): NetworkSinkO
   const observation: NetworkSinkObservation = {
     kind: "sink",
     sink: "network",
+    requestSurface: sink.requestSurface,
     method: sanitizeLabel(sink.method, variants).slice(0, 32),
     resourceType: sanitizeLabel(sink.resourceType, variants).slice(0, 64),
     recipient,

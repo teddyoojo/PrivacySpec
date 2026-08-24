@@ -1,3 +1,4 @@
+import { isAbsolute, join } from "node:path";
 import type {
   FullConfig,
   FullResult,
@@ -99,16 +100,26 @@ import {
   DEFAULT_LATEST_RUN_PATH,
 } from "../baseline/schema.js";
 import {
+  classifierConfigurationForBaseline,
   invalidateLatestRunFile,
   readBaselineFile,
   writeLatestRunFile,
 } from "../baseline/write.js";
 import { compareCanonicalStrings } from "../canonical-order.js";
 import type { DataFlow } from "../correlate/model.js";
+import {
+  BUILTIN_ONLY_CLASSIFIER_CONFIGURATION,
+  type ClassifierConfigurationState,
+  classifierConfigurationsEqual,
+  UNAVAILABLE_CLASSIFIER_CONFIGURATION,
+} from "../discovery/classifier-configuration.js";
 import type { ResponseJsonCoverage } from "../discovery/response-json.js";
+import { isDataCategory } from "../discovery/source-model.js";
 import type { NetworkObservationCoverage } from "../observe/network.js";
 import { removePrivacySpecReportSync, writePrivacySpecReport } from "../report/json.js";
 import {
+  type APIRequestReportCoverage,
+  type BrowserEngineReportCoverage,
   createPrivacySpecReport,
   DEFAULT_REPORT_PATH,
   type FirstPartyJsonResponseReportCoverage,
@@ -117,6 +128,7 @@ import {
   type ObservationCoverageReport,
   type PlaywrightInstrumentationReportCoverage,
   type PrivacySpecRunStatus,
+  REPORT_SCHEMA_VERSION,
   type TestAttemptCounts,
   type TestAttemptStatus,
 } from "../report/model.js";
@@ -124,15 +136,27 @@ import { renderSecondaryCoverageSummary } from "../report/terminal.js";
 import { RULE_DEFINITIONS } from "../rules/definitions.js";
 import { REPORT_LEVEL_LEGAL_MAPPINGS, RULE_LEGAL_MAPPINGS } from "../rules/legal-map.js";
 import type { Finding } from "../rules/model.js";
+import { isRunScopeIdentifier, writePrivacySpecRunPart } from "../run-scope/artifact.js";
+import {
+  DEFAULT_RUN_PARTS_DIRECTORY,
+  MAX_RUN_PARTS,
+  type PrivacySpecRunScopeOptions,
+  type ResolvedPrivacySpecRunScope,
+  RUN_PART_SCHEMA_VERSION,
+} from "../run-scope/model.js";
 import type { TestDataObservation } from "../testdata/model.js";
 import { parseTestDataAttachment } from "../testdata/validate.js";
 import type { PlaywrightObservationCounters } from "./coverage.js";
+import type { APIRequestCoverage, BrowserEngineCoverage } from "./experimental-coverage.js";
 import {
   ATTACHMENT_SCHEMA_VERSION,
-  isPrivacySpecResult,
+  ATTACHMENT_SCHEMA_VERSION_V3,
+  ATTACHMENT_SCHEMA_VERSION_V4,
+  getPrivacySpecResultValidationError,
   type PlaywrightInstrumentationCoverage,
   PRIVACYSPEC_ATTACHMENT_CONTENT_TYPE,
   PRIVACYSPEC_ATTACHMENT_NAME,
+  parsePrivacySpecResult,
 } from "./result.js";
 
 interface PrivacySpecReporterProfiles {
@@ -166,6 +190,7 @@ export interface PrivacySpecReporterOptions {
   dependencies?: DependencyReporterOptions | undefined;
   security?: SecurityReporterOptions | undefined;
   runtimeFailures?: RuntimeFailureReporterOptions | undefined;
+  runScope?: PrivacySpecRunScopeOptions | undefined;
   write?: (message: string) => void;
 }
 
@@ -174,6 +199,7 @@ type InformationalDiagnosticCode =
   | "PS_OBSERVER_FINALIZATION_FAILED"
   | "PS_OBSERVER_FINALIZATION_TIMEOUT"
   | "PS_SOURCE_LIMIT_REACHED"
+  | "PS_CUSTOM_SOURCE_AMBIGUOUS"
   | "PS_SINK_LIMIT_REACHED"
   | "PS_CORRELATION_LIMIT_REACHED";
 
@@ -187,17 +213,14 @@ const diagnosticCodes = new Set<InformationalDiagnosticCode>([
   "PS_OBSERVER_FINALIZATION_FAILED",
   "PS_OBSERVER_FINALIZATION_TIMEOUT",
   "PS_SOURCE_LIMIT_REACHED",
+  "PS_CUSTOM_SOURCE_AMBIGUOUS",
   "PS_SINK_LIMIT_REACHED",
   "PS_CORRELATION_LIMIT_REACHED",
 ]);
 const sinkCollectors = new Set(["network", "console", "storage"]);
-const dataCategories = new Set<DataFlow["dataCategory"]>([
-  "personal.email",
-  "personal.phone",
-  "secret.password",
-]);
 const sourceKinds = new Set<DataFlow["sourceKind"]>(["form-input", "dom-control", "response-json"]);
 const sourceConfidences = new Set<DataFlow["sourceConfidence"]>(["high", "medium", "low"]);
+const requestSurfaces = new Set<DataFlow["requestSurface"]>(["browser", "api-request"]);
 const dataFlowSinkKinds = new Set<DataFlow["sinkKind"]>([
   "request-url",
   "request-body",
@@ -301,6 +324,7 @@ const resolvedDestination = (flow: BaselineFlow): string =>
   flow.recipient === undefined ? "" : ` ${flow.recipient}`;
 
 interface SemanticFindingGroup {
+  key: string;
   flow: BaselineFlowCandidate;
   findings: Finding[];
 }
@@ -309,16 +333,15 @@ const groupSemanticFindings = (findings: readonly Finding[]): SemanticFindingGro
   const groups = new Map<string, SemanticFindingGroup>();
   for (const finding of findings) {
     const flow = createSemanticFindingCandidate(finding);
-    const existing = groups.get(flow.key);
+    const key = JSON.stringify([flow.key, finding.flow.requestSurface ?? "browser"]);
+    const existing = groups.get(key);
     if (existing === undefined) {
-      groups.set(flow.key, { flow, findings: [finding] });
+      groups.set(key, { key, flow, findings: [finding] });
     } else {
       existing.findings.push(finding);
     }
   }
-  return Array.from(groups.values()).sort((left, right) =>
-    left.flow.key.localeCompare(right.flow.key),
-  );
+  return Array.from(groups.values()).sort((left, right) => left.key.localeCompare(right.key));
 };
 
 const semanticFindingTests = (findings: readonly Finding[]): string => {
@@ -333,7 +356,7 @@ const semanticFindingTests = (findings: readonly Finding[]): string => {
 const writeSemanticFinding = (
   write: (message: string) => void,
   observed: Pick<ObservedBaselineFlow, "flow" | "findings">,
-  state: "new" | "technical_failure",
+  state: "new" | "not_baseline_eligible" | "technical_failure",
   changeReason?: BaselineChangeReason | undefined,
 ): void => {
   const [representative] = observed.findings;
@@ -344,10 +367,17 @@ const writeSemanticFinding = (
       ? ""
       : ` ${representative.flow.recipient?.firstParty === true ? "first-party" : "external"} ${flow.recipient}`;
   const request = [flow.endpoint, flow.location].filter(Boolean).join(" :: ");
-  const stateLabel = state === "new" ? " [NEW]" : "";
+  const stateLabel =
+    state === "new"
+      ? " [NEW]"
+      : state === "not_baseline_eligible"
+        ? " [NOT_BASELINE_ELIGIBLE]"
+        : "";
   const changeLabel = changeReason === undefined ? "" : ` [CHANGE=${changeReason}]`;
+  const requestSurfaceLabel =
+    representative.flow.requestSurface === "api-request" ? " [surface=api-request]" : "";
   write(
-    `PrivacySpec finding: ${representative.severity.toUpperCase()} ${representative.ruleId} [${representative.classification.toUpperCase()}]${stateLabel}${changeLabel} ${representative.title} :: ${flow.dataCategory} -> ${flow.sinkKind}${destination}${request ? ` :: ${request}` : ""} [${flow.transform}] (observations: ${observed.findings.length}; tests: ${semanticFindingTests(observed.findings)})\n`,
+    `PrivacySpec finding: ${representative.severity.toUpperCase()} ${representative.ruleId} [${representative.classification.toUpperCase()}]${stateLabel}${changeLabel}${requestSurfaceLabel} ${representative.title} :: ${flow.dataCategory} -> ${flow.sinkKind}${destination}${request ? ` :: ${request}` : ""} [${flow.transform}] (observations: ${observed.findings.length}; tests: ${semanticFindingTests(observed.findings)})\n`,
   );
 };
 
@@ -405,11 +435,14 @@ const parseDataFlow = (value: unknown): DataFlow | undefined => {
     !isRecord(value) ||
     value.kind !== "data-flow" ||
     typeof value.dataCategory !== "string" ||
-    !dataCategories.has(value.dataCategory as DataFlow["dataCategory"]) ||
+    !isDataCategory(value.dataCategory) ||
     typeof value.sourceKind !== "string" ||
     !sourceKinds.has(value.sourceKind as DataFlow["sourceKind"]) ||
     typeof value.sourceConfidence !== "string" ||
     !sourceConfidences.has(value.sourceConfidence as DataFlow["sourceConfidence"]) ||
+    (value.requestSurface !== undefined &&
+      (typeof value.requestSurface !== "string" ||
+        !requestSurfaces.has(value.requestSurface as DataFlow["requestSurface"]))) ||
     typeof value.sinkKind !== "string" ||
     !dataFlowSinkKinds.has(value.sinkKind as DataFlow["sinkKind"]) ||
     typeof value.transform !== "string" ||
@@ -485,6 +518,7 @@ const parseDataFlow = (value: unknown): DataFlow | undefined => {
 
   const flow: DataFlow = {
     kind: "data-flow",
+    requestSurface: (value.requestSurface as DataFlow["requestSurface"] | undefined) ?? "browser",
     dataCategory: value.dataCategory as DataFlow["dataCategory"],
     sourceKind: value.sourceKind as DataFlow["sourceKind"],
     sourceConfidence: value.sourceConfidence as DataFlow["sourceConfidence"],
@@ -722,6 +756,177 @@ const createReportNetworkCoverage = (): NetworkObservationReportCoverage => ({
   requests: { seen: 0, accepted: 0, filteredLowValueStatic: 0 },
 });
 
+const browserCapabilityNames = [
+  "init-scripts",
+  "events",
+  "teardown-fallback",
+  "network",
+  "console",
+  "storage",
+  "cookies",
+  "response-headers",
+  "page-errors",
+] as const;
+const capabilityStates = new Set(["complete", "partial", "incomplete", "unsupported", "disabled"]);
+const capabilityRank = {
+  complete: 0,
+  disabled: 1,
+  partial: 2,
+  incomplete: 3,
+  unsupported: 4,
+} as const;
+const supportRank = { supported: 0, experimental: 1, unsupported: 2 } as const;
+
+const parseBrowserEngineCoverage = (value: unknown): BrowserEngineCoverage | undefined => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["engine", "support", "experimental", "capabilities"]) ||
+    !["chromium", "firefox", "webkit"].includes(String(value.engine)) ||
+    !["supported", "experimental", "unsupported"].includes(String(value.support)) ||
+    typeof value.experimental !== "boolean" ||
+    !isRecord(value.capabilities) ||
+    !hasExactKeys(value.capabilities, browserCapabilityNames) ||
+    !browserCapabilityNames.every((name) =>
+      capabilityStates.has(String((value.capabilities as Record<string, unknown>)[name])),
+    )
+  ) {
+    return undefined;
+  }
+  const engine = value.engine as BrowserEngineCoverage["engine"];
+  const support = value.support as BrowserEngineCoverage["support"];
+  if (
+    (engine === "chromium" && (support !== "supported" || value.experimental)) ||
+    (support === "experimental") !== value.experimental ||
+    (support === "unsupported" &&
+      browserCapabilityNames.some(
+        (name) => (value.capabilities as Record<string, unknown>)[name] !== "unsupported",
+      ))
+  ) {
+    return undefined;
+  }
+  return structuredClone(value) as unknown as BrowserEngineCoverage;
+};
+
+const apiBlindSpots = [
+  "implicit-headers-cookies-auth",
+  "redirect-chain",
+  "page-request",
+  "context-request",
+  "manual-request-context",
+] as const;
+
+const parseAPIRequestCoverage = (value: unknown): APIRequestCoverage | undefined => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["enabled", "status", "calls", "skipped", "blindSpots"]) ||
+    typeof value.enabled !== "boolean" ||
+    !["complete", "partial", "unsupported"].includes(String(value.status)) ||
+    !hasNonNegativeCounts(value.calls, ["seen", "observed", "failed", "serverErrors"]) ||
+    value.calls.observed + value.calls.failed > value.calls.seen ||
+    value.calls.serverErrors > value.calls.observed ||
+    !hasNonNegativeCounts(value.skipped, [
+      "accessors",
+      "streams",
+      "files",
+      "unsupportedObjects",
+      "oversized",
+      "aggregateLimit",
+      "sinkLimit",
+      "materialLimit",
+    ]) ||
+    !Array.isArray(value.blindSpots) ||
+    JSON.stringify(value.blindSpots) !== JSON.stringify(apiBlindSpots) ||
+    (value.calls.seen === 0 && value.status !== "complete") ||
+    (value.calls.seen > 0 && value.status === "complete") ||
+    (value.enabled && value.calls.seen > 0 && value.status !== "partial") ||
+    (!value.enabled && value.calls.seen > 0 && value.status !== "unsupported")
+  ) {
+    return undefined;
+  }
+  return structuredClone(value) as unknown as APIRequestCoverage;
+};
+
+const unsupportedCapabilities =
+  (): BrowserEngineReportCoverage["engines"]["chromium"]["capabilities"] => ({
+    "init-scripts": "unsupported",
+    events: "unsupported",
+    "teardown-fallback": "unsupported",
+    network: "unsupported",
+    console: "unsupported",
+    storage: "unsupported",
+    cookies: "unsupported",
+    "response-headers": "unsupported",
+    "page-errors": "unsupported",
+  });
+
+const createReportBrowserEngineCoverage = (): BrowserEngineReportCoverage => ({
+  experimental: true,
+  tests: { supported: 0, experimental: 0, unsupported: 0, unavailable: 0 },
+  engines: {
+    chromium: { tests: 0, support: "supported", capabilities: unsupportedCapabilities() },
+    firefox: { tests: 0, support: "unsupported", capabilities: unsupportedCapabilities() },
+    webkit: { tests: 0, support: "unsupported", capabilities: unsupportedCapabilities() },
+  },
+});
+
+const addBrowserEngineCoverage = (
+  target: BrowserEngineReportCoverage,
+  coverage: BrowserEngineCoverage | undefined,
+): void => {
+  if (coverage === undefined) {
+    target.tests.unavailable += 1;
+    return;
+  }
+  target.tests[coverage.support] += 1;
+  const engine = target.engines[coverage.engine];
+  const first = engine.tests === 0;
+  engine.tests += 1;
+  if (first || supportRank[coverage.support] > supportRank[engine.support]) {
+    engine.support = coverage.support;
+  }
+  for (const capability of browserCapabilityNames) {
+    const incoming = coverage.capabilities[capability];
+    if (first || capabilityRank[incoming] > capabilityRank[engine.capabilities[capability]]) {
+      engine.capabilities[capability] = incoming;
+    }
+  }
+};
+
+const createReportAPIRequestCoverage = (): APIRequestReportCoverage => ({
+  experimental: true,
+  tests: { enabled: 0, disabled: 0, unavailable: 0, complete: 0, partial: 0, unsupported: 0 },
+  calls: { seen: 0, observed: 0, failed: 0, serverErrors: 0 },
+  skipped: {
+    accessors: 0,
+    streams: 0,
+    files: 0,
+    unsupportedObjects: 0,
+    oversized: 0,
+    aggregateLimit: 0,
+    sinkLimit: 0,
+    materialLimit: 0,
+  },
+  blindSpots: [...apiBlindSpots],
+});
+
+const addAPIRequestCoverage = (
+  target: APIRequestReportCoverage,
+  coverage: APIRequestCoverage | undefined,
+): void => {
+  if (coverage === undefined) {
+    target.tests.unavailable += 1;
+    return;
+  }
+  target.tests[coverage.enabled ? "enabled" : "disabled"] += 1;
+  target.tests[coverage.status] += 1;
+  for (const key of Object.keys(target.calls) as Array<keyof typeof target.calls>) {
+    target.calls[key] += coverage.calls[key];
+  }
+  for (const key of Object.keys(target.skipped) as Array<keyof typeof target.skipped>) {
+    target.skipped[key] += coverage.skipped[key];
+  }
+};
+
 const createPlaywrightObservationCounters = (): PlaywrightObservationCounters => ({
   browserObjects: { seen: 0 },
   contexts: { seen: 0, instrumented: 0 },
@@ -786,6 +991,8 @@ const createObservationCoverageReport = (input: {
   result: FullResult;
   testCounts: TestAttemptCounts;
   unavailableAttachments: number;
+  browserEngines: BrowserEngineReportCoverage;
+  apiRequests: APIRequestReportCoverage;
 }): ObservationCoverageReport => {
   const diagnostics: ObservationCoverageDiagnostic[] = [];
   const unsupported =
@@ -802,6 +1009,41 @@ const createObservationCoverageReport = (input: {
     diagnostics.push({
       code: "COVERAGE_RESULT_UNAVAILABLE",
       message: "One or more observed test results did not contain current coverage counters.",
+    });
+  }
+  if (input.browserEngines.tests.unavailable > 0 || input.apiRequests.tests.unavailable > 0) {
+    diagnostics.push({
+      code: "COVERAGE_RESULT_UNAVAILABLE",
+      message: "One or more observed test results did not contain current experimental coverage.",
+    });
+  }
+  if (input.browserEngines.tests.unsupported > 0) {
+    diagnostics.push({
+      code: "COVERAGE_UNSUPPORTED_BROWSER_ENGINE",
+      message: "One or more tests used Firefox or WebKit without the explicit experimental gate.",
+    });
+  }
+  const testedBrowserCapabilityStates = Object.values(input.browserEngines.engines).flatMap(
+    (engine) => (engine.tests > 0 ? Object.values(engine.capabilities) : []),
+  );
+  if (testedBrowserCapabilityStates.some((state) => state !== "complete")) {
+    diagnostics.push({
+      code: "COVERAGE_BROWSER_ENGINE_CAPABILITY_LIMITED",
+      message:
+        "One or more browser-engine capabilities were partial, incomplete, disabled, or unsupported.",
+    });
+  }
+  if (input.apiRequests.tests.partial > 0) {
+    diagnostics.push({
+      code: "COVERAGE_API_REQUEST_PARTIAL",
+      message:
+        "Observed request-fixture calls have partial coverage because implicit headers, authentication, cookies, and redirect hops are unavailable.",
+    });
+  }
+  if (input.apiRequests.tests.unsupported > 0) {
+    diagnostics.push({
+      code: "COVERAGE_API_REQUEST_UNSUPPORTED",
+      message: "The composed request fixture was used without the explicit API observation gate.",
     });
   }
   if (input.observerFinalizationIncomplete) {
@@ -864,15 +1106,28 @@ const createObservationCoverageReport = (input: {
     ].includes(diagnostic.code),
   );
   const partial = diagnostics.some((diagnostic) =>
-    ["COVERAGE_LIMIT_REACHED", "COVERAGE_OPTIONAL_OBSERVER_SKIPPED"].includes(diagnostic.code),
+    [
+      "COVERAGE_LIMIT_REACHED",
+      "COVERAGE_OPTIONAL_OBSERVER_SKIPPED",
+      "COVERAGE_API_REQUEST_PARTIAL",
+    ].includes(diagnostic.code),
   );
-  const status = unsupported
-    ? "unsupported"
-    : incomplete
-      ? "incomplete"
-      : partial
-        ? "partial"
-        : "complete";
+  const engineCapabilityUnsupported = testedBrowserCapabilityStates.includes("unsupported");
+  const engineCapabilityIncomplete = testedBrowserCapabilityStates.includes("incomplete");
+  const engineCapabilityPartial = testedBrowserCapabilityStates.some(
+    (state) => state === "partial" || state === "disabled",
+  );
+  const status =
+    unsupported ||
+    engineCapabilityUnsupported ||
+    input.browserEngines.tests.unsupported > 0 ||
+    input.apiRequests.tests.unsupported > 0
+      ? "unsupported"
+      : incomplete || engineCapabilityIncomplete
+        ? "incomplete"
+        : partial || engineCapabilityPartial
+          ? "partial"
+          : "complete";
 
   return {
     status,
@@ -910,19 +1165,22 @@ const addPlaywrightCoverage = (
 export default class PrivacySpecReporter implements Reporter {
   readonly #write: (message: string) => void;
   readonly #baselinePath: string | false;
-  readonly #latestRunPath: string | false;
-  readonly #reportPath: string | false;
+  #latestRunPath: string | false;
+  #reportPath: string | false;
   readonly #dependencyBaselinePath: string | false;
-  readonly #dependencyLatestRunPath: string | false;
-  readonly #dependencyReportPath: string | false;
+  #dependencyLatestRunPath: string | false;
+  #dependencyReportPath: string | false;
   readonly #securityBaselinePath: string | false;
-  readonly #securityLatestRunPath: string | false;
-  readonly #securityReportPath: string | false;
+  #securityLatestRunPath: string | false;
+  #securityReportPath: string | false;
   readonly #runtimeFailureBaselinePath: string | false;
-  readonly #runtimeFailureLatestRunPath: string | false;
-  readonly #runtimeFailureReportPath: string | false;
+  #runtimeFailureLatestRunPath: string | false;
+  #runtimeFailureReportPath: string | false;
   readonly #failOnNewReviewFindings: boolean;
   readonly #nis2EvidenceProfile: boolean;
+  readonly #runScopeOptions: PrivacySpecRunScopeOptions | undefined;
+  #runScope: ResolvedPrivacySpecRunScope | undefined;
+  #shardScopeMissing = false;
   #observedAttempts = 0;
   #nonPassingAttempts = 0;
   readonly #sourceCounts = new Map<string, number>();
@@ -934,8 +1192,11 @@ export default class PrivacySpecReporter implements Reporter {
   readonly #responseCoverage = createReportResponseCoverage();
   readonly #playwrightCoverage = createReportPlaywrightCoverage();
   readonly #networkCoverage = createReportNetworkCoverage();
+  readonly #browserEngineCoverage = createReportBrowserEngineCoverage();
+  readonly #apiRequestCoverage = createReportAPIRequestCoverage();
   readonly #observationCounters = createPlaywrightObservationCounters();
   #observationCoverageUnavailable = 0;
+  readonly #classifierConfigurations = new Map<string, ClassifierConfigurationState>();
   readonly #testDataObservations = new Map<string, TestDataObservation>();
   readonly #dependencyInventory = new Map<string, RuntimeDependencyInventoryEntry>();
   readonly #dependencyDiagnostics = new Map<string, DependencyDiagnostic>();
@@ -956,41 +1217,55 @@ export default class PrivacySpecReporter implements Reporter {
 
   constructor(options: PrivacySpecReporterOptions = {}) {
     this.#write = options.write ?? ((message) => process.stdout.write(message));
+    this.#runScopeOptions = options.runScope;
+    const writesRunPart = this.#runScopeOptions !== undefined;
     // `write` is an internal test seam; callers that replace terminal output do
     // not persist artifacts unless they also opt into explicit paths.
-    this.#baselinePath =
-      options.baselinePath ?? (options.write === undefined ? DEFAULT_BASELINE_PATH : false);
-    this.#latestRunPath =
-      options.latestRunPath ?? (options.write === undefined ? DEFAULT_LATEST_RUN_PATH : false);
-    this.#reportPath =
-      options.reportPath ?? (options.write === undefined ? DEFAULT_REPORT_PATH : false);
-    this.#dependencyBaselinePath =
-      options.dependencies?.baselinePath ??
-      (options.write === undefined ? DEFAULT_DEPENDENCY_BASELINE_PATH : false);
-    this.#dependencyLatestRunPath =
-      options.dependencies?.latestRunPath ??
-      (options.write === undefined ? DEFAULT_DEPENDENCY_LATEST_RUN_PATH : false);
-    this.#dependencyReportPath =
-      options.dependencies?.reportPath ??
-      (options.write === undefined ? DEFAULT_DEPENDENCY_REPORT_PATH : false);
-    this.#securityBaselinePath =
-      options.security?.baselinePath ??
-      (options.write === undefined ? DEFAULT_SECURITY_BASELINE_PATH : false);
-    this.#securityLatestRunPath =
-      options.security?.latestRunPath ??
-      (options.write === undefined ? DEFAULT_SECURITY_LATEST_RUN_PATH : false);
-    this.#securityReportPath =
-      options.security?.reportPath ??
-      (options.write === undefined ? DEFAULT_SECURITY_REPORT_PATH : false);
-    this.#runtimeFailureBaselinePath =
-      options.runtimeFailures?.baselinePath ??
-      (options.write === undefined ? DEFAULT_RUNTIME_FAILURE_BASELINE_PATH : false);
-    this.#runtimeFailureLatestRunPath =
-      options.runtimeFailures?.latestRunPath ??
-      (options.write === undefined ? DEFAULT_RUNTIME_FAILURE_LATEST_RUN_PATH : false);
-    this.#runtimeFailureReportPath =
-      options.runtimeFailures?.reportPath ??
-      (options.write === undefined ? DEFAULT_RUNTIME_FAILURE_REPORT_PATH : false);
+    this.#baselinePath = writesRunPart
+      ? false
+      : (options.baselinePath ?? (options.write === undefined ? DEFAULT_BASELINE_PATH : false));
+    this.#latestRunPath = writesRunPart
+      ? false
+      : (options.latestRunPath ?? (options.write === undefined ? DEFAULT_LATEST_RUN_PATH : false));
+    this.#reportPath = writesRunPart
+      ? false
+      : (options.reportPath ?? (options.write === undefined ? DEFAULT_REPORT_PATH : false));
+    this.#dependencyBaselinePath = writesRunPart
+      ? false
+      : (options.dependencies?.baselinePath ??
+        (options.write === undefined ? DEFAULT_DEPENDENCY_BASELINE_PATH : false));
+    this.#dependencyLatestRunPath = writesRunPart
+      ? false
+      : (options.dependencies?.latestRunPath ??
+        (options.write === undefined ? DEFAULT_DEPENDENCY_LATEST_RUN_PATH : false));
+    this.#dependencyReportPath = writesRunPart
+      ? false
+      : (options.dependencies?.reportPath ??
+        (options.write === undefined ? DEFAULT_DEPENDENCY_REPORT_PATH : false));
+    this.#securityBaselinePath = writesRunPart
+      ? false
+      : (options.security?.baselinePath ??
+        (options.write === undefined ? DEFAULT_SECURITY_BASELINE_PATH : false));
+    this.#securityLatestRunPath = writesRunPart
+      ? false
+      : (options.security?.latestRunPath ??
+        (options.write === undefined ? DEFAULT_SECURITY_LATEST_RUN_PATH : false));
+    this.#securityReportPath = writesRunPart
+      ? false
+      : (options.security?.reportPath ??
+        (options.write === undefined ? DEFAULT_SECURITY_REPORT_PATH : false));
+    this.#runtimeFailureBaselinePath = writesRunPart
+      ? false
+      : (options.runtimeFailures?.baselinePath ??
+        (options.write === undefined ? DEFAULT_RUNTIME_FAILURE_BASELINE_PATH : false));
+    this.#runtimeFailureLatestRunPath = writesRunPart
+      ? false
+      : (options.runtimeFailures?.latestRunPath ??
+        (options.write === undefined ? DEFAULT_RUNTIME_FAILURE_LATEST_RUN_PATH : false));
+    this.#runtimeFailureReportPath = writesRunPart
+      ? false
+      : (options.runtimeFailures?.reportPath ??
+        (options.write === undefined ? DEFAULT_RUNTIME_FAILURE_REPORT_PATH : false));
     // Phase 8 policy decision A: new contextual review findings warn by default.
     this.#failOnNewReviewFindings = options.failOnNewReviewFindings ?? false;
     this.#nis2EvidenceProfile = options.profiles?.nis2_2024_2690 === true;
@@ -1000,6 +1275,73 @@ export default class PrivacySpecReporter implements Reporter {
     for (const project of config?.projects ?? []) {
       if (isBoundedTerminalString(project.name, MAX_TEST_PROJECT_LENGTH)) {
         this.#projectNames.add(project.name);
+      }
+    }
+    if (
+      this.#runScopeOptions === undefined &&
+      config?.shard !== null &&
+      config?.shard !== undefined
+    ) {
+      this.#shardScopeMissing = true;
+      this.#latestRunPath = false;
+      this.#reportPath = false;
+      this.#dependencyLatestRunPath = false;
+      this.#dependencyReportPath = false;
+      this.#securityLatestRunPath = false;
+      this.#securityReportPath = false;
+      this.#runtimeFailureLatestRunPath = false;
+      this.#runtimeFailureReportPath = false;
+      this.#integrationErrors.push(
+        "Playwright sharding requires an explicit PrivacySpec runScope; single-writer outputs were disabled",
+      );
+    }
+    if (this.#runScopeOptions !== undefined) {
+      const { runId, configurationId, outputDirectory } = this.#runScopeOptions;
+      const explicitPart = this.#runScopeOptions.part;
+      const explicitTotal = this.#runScopeOptions.total;
+      const shard = config?.shard ?? undefined;
+      if (
+        outputDirectory !== undefined &&
+        (!isBoundedTerminalString(outputDirectory, MAX_ENDPOINT_LENGTH, false) ||
+          (!isAbsolute(outputDirectory) && outputDirectory.split(/[\\/]+/u).includes("..")))
+      ) {
+        this.#integrationErrors.push("invalid run-scope output directory");
+      } else if (!isRunScopeIdentifier(runId) || !isRunScopeIdentifier(configurationId)) {
+        this.#integrationErrors.push(
+          "invalid run-scope identity; use 1-128 ASCII letters, digits, dots, underscores, or hyphens",
+        );
+      } else if ((explicitPart === undefined) !== (explicitTotal === undefined)) {
+        this.#integrationErrors.push("run-scope part and total must be supplied together");
+      } else {
+        const part = explicitPart ?? shard?.current ?? 1;
+        const total = explicitTotal ?? shard?.total ?? 1;
+        if (
+          !Number.isSafeInteger(part) ||
+          !Number.isSafeInteger(total) ||
+          part < 1 ||
+          total < 1 ||
+          part > total ||
+          total > MAX_RUN_PARTS
+        ) {
+          this.#integrationErrors.push("run-scope coordinates must identify a part within 1..128");
+        } else if (
+          shard !== undefined &&
+          (explicitPart !== undefined || explicitTotal !== undefined) &&
+          (part !== shard.current || total !== shard.total)
+        ) {
+          this.#integrationErrors.push(
+            "run-scope coordinates do not match Playwright shard metadata",
+          );
+        } else {
+          const directory = join(outputDirectory ?? DEFAULT_RUN_PARTS_DIRECTORY, runId);
+          this.#runScope = {
+            runId,
+            configurationId,
+            part,
+            total,
+            outputPath: join(directory, `part-${part}-of-${total}.json`),
+          };
+        }
       }
     }
     if (this.#latestRunPath !== false) {
@@ -1284,10 +1626,9 @@ export default class PrivacySpecReporter implements Reporter {
     }
 
     try {
-      const parsed: unknown = JSON.parse(attachment.body.toString("utf8"));
-      if (!isPrivacySpecResult(parsed)) {
-        throw new Error("unsupported result schema");
-      }
+      const raw: unknown = JSON.parse(attachment.body.toString("utf8"));
+      const parsed = parsePrivacySpecResult(raw);
+      if (parsed === undefined) throw new Error(getPrivacySpecResultValidationError(raw));
       const responseCoverage =
         parsed.schemaVersion === 1
           ? undefined
@@ -1308,11 +1649,42 @@ export default class PrivacySpecReporter implements Reporter {
         throw new Error("invalid network observation coverage");
       }
       const observationCoverage =
-        parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION
+        parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION ||
+        parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION_V4 ||
+        parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION_V3
           ? parsePlaywrightObservationCounters(parsed.coverage.observation)
           : undefined;
-      if (parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION && observationCoverage === undefined) {
+      if (
+        (parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION ||
+          parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION_V4 ||
+          parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION_V3) &&
+        observationCoverage === undefined
+      ) {
         throw new Error("invalid observation coverage counters");
+      }
+      const browserEngineCoverage =
+        parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION ||
+        parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION_V4
+          ? parseBrowserEngineCoverage(parsed.coverage.browserEngine)
+          : undefined;
+      if (
+        (parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION ||
+          parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION_V4) &&
+        browserEngineCoverage === undefined
+      ) {
+        throw new Error("invalid browser-engine coverage");
+      }
+      const apiRequestCoverage =
+        parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION ||
+        parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION_V4
+          ? parseAPIRequestCoverage(parsed.coverage.apiRequests)
+          : undefined;
+      if (
+        (parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION ||
+          parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION_V4) &&
+        apiRequestCoverage === undefined
+      ) {
+        throw new Error("invalid API-request coverage");
       }
       const testData =
         parsed.schemaVersion === 1 || parsed.testData === undefined
@@ -1373,7 +1745,7 @@ export default class PrivacySpecReporter implements Reporter {
           isRecord(observation) &&
           observation.kind === "sensitive-source" &&
           typeof observation.category === "string" &&
-          dataCategories.has(observation.category as DataFlow["dataCategory"])
+          isDataCategory(observation.category)
         ) {
           this.#sourceCounts.set(
             observation.category,
@@ -1395,9 +1767,19 @@ export default class PrivacySpecReporter implements Reporter {
       if (networkCoverage !== undefined) addNetworkCoverage(this.#networkCoverage, networkCoverage);
       if (observationCoverage === undefined) this.#observationCoverageUnavailable += 1;
       else addPlaywrightObservationCounters(this.#observationCounters, observationCoverage);
+      addBrowserEngineCoverage(this.#browserEngineCoverage, browserEngineCoverage);
+      addAPIRequestCoverage(this.#apiRequestCoverage, apiRequestCoverage);
       for (const observation of testData?.observations ?? []) {
         this.#testDataObservations.set(JSON.stringify(observation), observation);
       }
+      const classifierConfiguration: ClassifierConfigurationState =
+        parsed.schemaVersion === ATTACHMENT_SCHEMA_VERSION
+          ? parsed.classifierConfiguration
+          : UNAVAILABLE_CLASSIFIER_CONFIGURATION;
+      this.#classifierConfigurations.set(
+        JSON.stringify(classifierConfiguration),
+        structuredClone(classifierConfiguration),
+      );
       this.#observedAttempts += 1;
       this.#testCounts.observed += 1;
     } catch (error) {
@@ -1416,6 +1798,16 @@ export default class PrivacySpecReporter implements Reporter {
     let comparison: BaselineComparison = compareBaseline(findings, undefined);
     let baselineExists = false;
     let acceptedBaselineFlows: BaselineFlow[] = [];
+    const classifierConfiguration: ClassifierConfigurationState =
+      this.#classifierConfigurations.size === 1
+        ? structuredClone(
+            Array.from(this.#classifierConfigurations.values())[0] ??
+              UNAVAILABLE_CLASSIFIER_CONFIGURATION,
+          )
+        : this.#classifierConfigurations.size === 0 && this.#testCounts.total === 0
+          ? BUILTIN_ONLY_CLASSIFIER_CONFIGURATION
+          : UNAVAILABLE_CLASSIFIER_CONFIGURATION;
+    let classifierConfigurationCompatible = classifierConfiguration.mode !== "unavailable";
 
     const observationCoverage = createObservationCoverageReport({
       counters: this.#observationCounters,
@@ -1427,6 +1819,8 @@ export default class PrivacySpecReporter implements Reporter {
       result,
       testCounts: this.#testCounts,
       unavailableAttachments: this.#observationCoverageUnavailable,
+      browserEngines: this.#browserEngineCoverage,
+      apiRequests: this.#apiRequestCoverage,
     });
     const timingAvailable = hasRunTiming(result);
     const terminalDetails: string[] = [];
@@ -1438,9 +1832,13 @@ export default class PrivacySpecReporter implements Reporter {
       const entirelyUninstrumentedApplication =
         observationCoverage.pages.seen > 0 && observationCoverage.pages.instrumented === 0;
       this.#integrationErrors.push(
-        entirelyUninstrumentedApplication
-          ? `COVERAGE_INCOMPATIBLE: ${this.#observedAttempts} Playwright tests ran but no application BrowserContexts were instrumented. Tests may be creating pages through browser.newPage() or independent browser contexts.`
-          : `COVERAGE_INCOMPATIBLE: PrivacySpec detected application BrowserContexts or pages outside the instrumented test context (${observationCoverage.contexts.instrumented}/${observationCoverage.contexts.seen} contexts, ${observationCoverage.pages.instrumented}/${observationCoverage.pages.seen} pages instrumented).`,
+        this.#browserEngineCoverage.tests.unsupported > 0
+          ? "COVERAGE_UNSUPPORTED_BROWSER_ENGINE: Firefox or WebKit tests require the explicit PrivacySpec experimental browserEngines gate."
+          : this.#apiRequestCoverage.tests.unsupported > 0
+            ? "COVERAGE_UNSUPPORTED_API_REQUEST: the composed Playwright request fixture was used without the explicit PrivacySpec apiRequestContext gate."
+            : entirelyUninstrumentedApplication
+              ? `COVERAGE_INCOMPATIBLE: ${this.#observedAttempts} Playwright tests ran but no application BrowserContexts were instrumented. Tests may be creating pages through browser.newPage() or independent browser contexts.`
+              : `COVERAGE_INCOMPATIBLE: PrivacySpec detected application BrowserContexts or pages outside the instrumented test context (${observationCoverage.contexts.instrumented}/${observationCoverage.contexts.seen} contexts, ${observationCoverage.pages.instrumented}/${observationCoverage.pages.seen} pages instrumented).`,
       );
     }
 
@@ -1450,9 +1848,29 @@ export default class PrivacySpecReporter implements Reporter {
         baselineExists = baseline !== undefined;
         acceptedBaselineFlows = baseline?.flows ?? [];
         comparison = compareBaseline(findings, baseline);
+        if (baseline !== undefined) {
+          const baselineClassifierConfiguration = classifierConfigurationForBaseline(baseline);
+          classifierConfigurationCompatible =
+            classifierConfigurationCompatible &&
+            baselineClassifierConfiguration.mode !== "unavailable" &&
+            classifierConfigurationsEqual(classifierConfiguration, baselineClassifierConfiguration);
+        }
       } catch (error) {
         this.#integrationErrors.push(
           `could not read semantic baseline (${terminalErrorMessage(error)})`,
+        );
+      }
+    }
+    if (!classifierConfigurationCompatible) {
+      comparison = {
+        observed: comparison.observed,
+        known: [],
+        new: [],
+        resolved: [],
+      };
+      if (this.#observedAttempts > 0) {
+        writeDetail(
+          "PrivacySpec classifier configuration: unavailable or incompatible; privacy baseline comparison suppressed.\n",
         );
       }
     }
@@ -1553,7 +1971,38 @@ export default class PrivacySpecReporter implements Reporter {
       }
     }
 
-    const runComplete =
+    if (this.#runScopeOptions !== undefined || this.#shardScopeMissing) {
+      comparison = {
+        observed: comparison.observed,
+        known: [],
+        new: [],
+        resolved: [],
+      };
+      dependencyComparison = {
+        ...dependencyComparison,
+        known: [],
+        new: [],
+        resolved: [],
+        findings: [],
+      };
+      securityComparison = {
+        ...securityComparison,
+        known: [],
+        newTargets: [],
+        changed: [],
+        resolved: [],
+        findings: [],
+      };
+      runtimeFailureComparison = {
+        ...runtimeFailureComparison,
+        known: [],
+        new: [],
+        resolved: [],
+        findings: [],
+      };
+    }
+
+    const privacyObservationComplete =
       result.status === "passed" &&
       this.#observedAttempts > 0 &&
       this.#nonPassingAttempts === 0 &&
@@ -1561,6 +2010,7 @@ export default class PrivacySpecReporter implements Reporter {
       observationCoverage.status === "complete" &&
       !findings.some((finding) => finding.classification === "technical_failure") &&
       this.#integrationErrors.length === 0;
+    const runComplete = privacyObservationComplete && classifierConfigurationCompatible;
     const dependencyRunComplete =
       result.status === "passed" &&
       this.#observedAttempts > 0 &&
@@ -1588,7 +2038,8 @@ export default class PrivacySpecReporter implements Reporter {
     if (this.#latestRunPath !== false) {
       try {
         await writeLatestRunFile(this.#latestRunPath, comparison.observed, {
-          complete: runComplete,
+          complete: privacyObservationComplete && classifierConfiguration.mode !== "unavailable",
+          classifierConfiguration,
         });
       } catch (error) {
         this.#integrationErrors.push(
@@ -1669,6 +2120,24 @@ export default class PrivacySpecReporter implements Reporter {
     if (this.#networkCoverage.requests.filteredLowValueStatic > 0) {
       writeDetail(
         `PrivacySpec network filtering: low-value static requests=${this.#networkCoverage.requests.filteredLowValueStatic}\n`,
+      );
+    }
+    const experimentalEngineTests = this.#browserEngineCoverage.tests.experimental;
+    if (experimentalEngineTests > 0) {
+      const engines = (["firefox", "webkit"] as const)
+        .filter((engine) => this.#browserEngineCoverage.engines[engine].tests > 0)
+        .join(",");
+      writeDetail(
+        `PrivacySpec experimental browser engines: tests=${experimentalEngineTests}, engines=${engines}\n`,
+      );
+    }
+    if (this.#apiRequestCoverage.calls.seen > 0) {
+      const skipped = Object.values(this.#apiRequestCoverage.skipped).reduce(
+        (total, count) => total + count,
+        0,
+      );
+      writeDetail(
+        `PrivacySpec experimental API request fixture: calls=${this.#apiRequestCoverage.calls.seen}, observed=${this.#apiRequestCoverage.calls.observed}, failed=${this.#apiRequestCoverage.calls.failed}, skipped=${skipped}, coverage=${this.#apiRequestCoverage.tests.partial > 0 ? "PARTIAL" : "UNSUPPORTED"}\n`,
       );
     }
     if (this.#flows.size > 0) {
@@ -1840,34 +2309,50 @@ export default class PrivacySpecReporter implements Reporter {
       comparison.new.reduce((count, observed) => count + observed.findings.length, 0);
 
     const finalRunComplete = runComplete && this.#integrationErrors.length === 0;
-    let evidenceRunComplete =
+    const localEvidenceRunComplete =
       result.status === "passed" &&
       this.#observedAttempts > 0 &&
       this.#nonPassingAttempts === 0 &&
       this.#diagnostics.size === 0 &&
       observationCoverage.status === "complete" &&
+      this.#integrationErrors.length === 0 &&
+      classifierConfigurationCompatible;
+    const zeroTestPartComplete =
+      this.#runScopeOptions !== undefined &&
+      result.status === "passed" &&
+      this.#testCounts.total === 0 &&
       this.#integrationErrors.length === 0;
+    let evidenceRunComplete =
+      this.#runScopeOptions === undefined ? localEvidenceRunComplete : false;
     let resolved = finalRunComplete ? comparison.resolved : [];
     const startedAt = timingAvailable ? result.startTime : new Date();
     const durationMilliseconds = timingAvailable ? result.duration : 0;
-    let privacyspecStatus = runStatus(
-      result,
-      evidenceRunComplete,
-      technicalFailures,
-      newReviewRequired,
-      this.#integrationErrors.length,
-      this.#failOnNewReviewFindings,
-    );
+    let privacyspecStatus =
+      this.#runScopeOptions === undefined
+        ? runStatus(
+            result,
+            evidenceRunComplete,
+            technicalFailures,
+            newReviewRequired,
+            this.#integrationErrors.length,
+            this.#failOnNewReviewFindings,
+          )
+        : "incomplete";
     let reportWritten = false;
     let dependencyReportWritten = false;
     let securityReportWritten = false;
     let runtimeFailureReportWritten = false;
+    let runPartWritten = false;
+    let runPartWriteFailed = false;
 
     const generatedAt = new Date(startedAt.getTime() + durationMilliseconds).toISOString();
     const dependencyReport: DependencyReport = {
       schemaVersion: DEPENDENCY_REPORT_SCHEMA_VERSION,
       generatedAt,
-      complete: dependencyRunComplete && this.#integrationErrors.length === 0,
+      complete:
+        this.#runScopeOptions === undefined &&
+        dependencyRunComplete &&
+        this.#integrationErrors.length === 0,
       coverage: dependencyCoverage,
       inventory: dependencyInventory,
       findings: dependencyComparison.findings,
@@ -1886,7 +2371,10 @@ export default class PrivacySpecReporter implements Reporter {
     const securityReport: SecurityReport = {
       schemaVersion: SECURITY_SCHEMA_VERSION,
       generatedAt,
-      complete: securityRunComplete && this.#integrationErrors.length === 0,
+      complete:
+        this.#runScopeOptions === undefined &&
+        securityRunComplete &&
+        this.#integrationErrors.length === 0,
       coverage: securityCoverage,
       inventory: securityInventory,
       findings: securityComparison.findings,
@@ -1906,7 +2394,10 @@ export default class PrivacySpecReporter implements Reporter {
     const runtimeFailureReport: RuntimeFailureReport = {
       schemaVersion: RUNTIME_FAILURE_SCHEMA_VERSION,
       generatedAt,
-      complete: runtimeFailureRunComplete && this.#integrationErrors.length === 0,
+      complete:
+        this.#runScopeOptions === undefined &&
+        runtimeFailureRunComplete &&
+        this.#integrationErrors.length === 0,
       coverage: runtimeFailureCoverage,
       inventory: runtimeFailureInventory,
       findings: runtimeFailureRunComplete ? runtimeFailureComparison.findings : [],
@@ -1995,8 +2486,11 @@ export default class PrivacySpecReporter implements Reporter {
     const profileMappings = this.#nis2EvidenceProfile
       ? [REPORT_LEVEL_LEGAL_MAPPINGS.nis2_2024_2690]
       : [];
-    const createUnifiedReport = () =>
-      createPrivacySpecReport({
+    const createUnifiedReport = () => {
+      const reportComparison: BaselineComparison = evidenceRunComplete
+        ? { ...comparison, resolved }
+        : { observed: comparison.observed, known: [], new: [], resolved: [] };
+      return createPrivacySpecReport({
         generatedAt,
         startedAt: startedAt.toISOString(),
         playwrightStatus: result.status,
@@ -2012,7 +2506,7 @@ export default class PrivacySpecReporter implements Reporter {
           JSON.stringify(left).localeCompare(JSON.stringify(right)),
         ),
         findings,
-        comparison: { ...comparison, resolved },
+        comparison: reportComparison,
         baselineExists,
         diagnostics: Array.from(this.#diagnostics.values()).sort(
           (left, right) =>
@@ -2025,6 +2519,8 @@ export default class PrivacySpecReporter implements Reporter {
         playwrightCoverage: this.#playwrightCoverage,
         networkCoverage: this.#networkCoverage,
         observationCoverage,
+        browserEngineCoverage: this.#browserEngineCoverage,
+        apiRequestCoverage: this.#apiRequestCoverage,
         testDataObservations: Array.from(this.#testDataObservations.values()),
         secondaryAnalysis: {
           dependencies: dependencyReport,
@@ -2032,6 +2528,7 @@ export default class PrivacySpecReporter implements Reporter {
           runtimeErrors: runtimeFailureReport,
         },
       });
+    };
     let unifiedReport = createUnifiedReport();
     if (this.#reportPath !== false) {
       try {
@@ -2057,15 +2554,57 @@ export default class PrivacySpecReporter implements Reporter {
       }
     }
 
+    if (this.#runScopeOptions !== undefined) {
+      if (this.#runScope === undefined) {
+        runPartWriteFailed = true;
+      } else {
+        try {
+          await writePrivacySpecRunPart(this.#runScope.outputPath, {
+            runPartSchemaVersion: RUN_PART_SCHEMA_VERSION,
+            scope: {
+              runId: this.#runScope.runId,
+              configurationId: this.#runScope.configurationId,
+              part: this.#runScope.part,
+              total: this.#runScope.total,
+              failOnNewReviewFindings: this.#failOnNewReviewFindings,
+              nis2EvidenceProfile: this.#nis2EvidenceProfile,
+            },
+            completeness: {
+              privacy:
+                (privacyObservationComplete && classifierConfiguration.mode !== "unavailable") ||
+                zeroTestPartComplete,
+              dependencies: dependencyRunComplete || zeroTestPartComplete,
+              security: securityRunComplete || zeroTestPartComplete,
+              runtimeErrors: runtimeFailureRunComplete || zeroTestPartComplete,
+            },
+            classifierConfiguration,
+            report: unifiedReport,
+          });
+          runPartWritten = true;
+        } catch (error) {
+          this.#integrationErrors.push(
+            `could not write run-part artifact (${terminalErrorMessage(error)})`,
+          );
+          runPartWriteFailed = true;
+        }
+      }
+    }
+
     if (technicalFailures > 0 || newReviewRequired > 0) {
+      const reviewFindingLabel = evidenceRunComplete
+        ? "new review findings"
+        : "baseline-ineligible review findings";
       writeDetail(
-        `PrivacySpec semantic findings: ${technicalFailures + newReviewRequired} (technical failures=${technicalFailures}, new review findings=${newReviewRequired}, observations=${actionableObservations})\n`,
+        `PrivacySpec semantic findings: ${technicalFailures + newReviewRequired} (technical failures=${technicalFailures}, ${reviewFindingLabel}=${newReviewRequired}, observations=${actionableObservations})\n`,
       );
     }
 
-    if (baselineExists || comparison.observed.length > 0 || resolved.length > 0) {
+    const displayedComparison: BaselineComparison = evidenceRunComplete
+      ? comparison
+      : { observed: comparison.observed, known: [], new: [], resolved: [] };
+    if (baselineExists || displayedComparison.observed.length > 0 || resolved.length > 0) {
       writeDetail(
-        `PrivacySpec baseline: known=${comparison.known.length}, new=${comparison.new.length}, resolved=${resolved.length}\n`,
+        `PrivacySpec baseline: known=${displayedComparison.known.length}, new=${displayedComparison.new.length}, resolved=${resolved.length}\n`,
       );
     }
 
@@ -2108,8 +2647,10 @@ export default class PrivacySpecReporter implements Reporter {
       writeSemanticFinding(
         writeDetail,
         observed,
-        "new",
-        classifyBaselineChange(observed.flow, acceptedBaselineFlows),
+        evidenceRunComplete ? "new" : "not_baseline_eligible",
+        evidenceRunComplete
+          ? classifyBaselineChange(observed.flow, acceptedBaselineFlows)
+          : undefined,
       );
     }
     const omittedPrivacyFindings =
@@ -2175,7 +2716,7 @@ export default class PrivacySpecReporter implements Reporter {
       );
       if (reportWritten && this.#reportPath !== false) {
         writeDetail(
-          `PrivacySpec JSON report: ${terminalLabel(this.#reportPath, MAX_ENDPOINT_LENGTH, "[unprintable report path]")} (schema v4)\n`,
+          `PrivacySpec JSON report: ${terminalLabel(this.#reportPath, MAX_ENDPOINT_LENGTH, "[unprintable report path]")} (schema v${REPORT_SCHEMA_VERSION})\n`,
         );
       }
       if (dependencyReportWritten && this.#dependencyReportPath !== false) {
@@ -2191,6 +2732,14 @@ export default class PrivacySpecReporter implements Reporter {
       if (runtimeFailureReportWritten && this.#runtimeFailureReportPath !== false) {
         writeDetail(
           `PrivacySpec runtime failure report: ${terminalLabel(this.#runtimeFailureReportPath, MAX_ENDPOINT_LENGTH, "[unprintable runtime failure report path]")} (schema v1)\n`,
+        );
+      }
+      if (runPartWritten && this.#runScope !== undefined) {
+        writeDetail(
+          `PrivacySpec run part: ${terminalLabel(this.#runScope.outputPath, MAX_ENDPOINT_LENGTH, "[unprintable run-part path]")} (schema v${RUN_PART_SCHEMA_VERSION}, ${this.#runScope.part}/${this.#runScope.total}, baseline-ineligible)\n`,
+        );
+        writeDetail(
+          "PrivacySpec run scope: aggregate all expected parts before publishing results.\n",
         );
       }
     }
@@ -2222,7 +2771,7 @@ export default class PrivacySpecReporter implements Reporter {
       );
     }
 
-    if (overallStatus !== "failed") return undefined;
+    if (overallStatus !== "failed" && !runPartWriteFailed) return undefined;
     return { status: "failed" };
   }
 }

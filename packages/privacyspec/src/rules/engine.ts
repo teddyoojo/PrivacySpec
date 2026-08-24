@@ -1,4 +1,5 @@
 import type { DataFlow } from "../correlate/model.js";
+import { getDataCategoryFamily } from "../discovery/source-model.js";
 import { RULE_DEFINITIONS } from "./definitions.js";
 import type {
   Finding,
@@ -16,9 +17,10 @@ const storageSinkKinds = new Set<DataFlow["sinkKind"]>([
 
 const isHighConfidence = (flow: DataFlow): boolean => flow.sourceConfidence === "high";
 
-const isPersonalData = (flow: DataFlow): boolean => flow.dataCategory.startsWith("personal.");
+const isPersonalData = (flow: DataFlow): boolean =>
+  getDataCategoryFamily(flow.dataCategory) === "personal";
 
-const isSecret = (flow: DataFlow): boolean => flow.dataCategory.startsWith("secret.");
+const isSecret = (flow: DataFlow): boolean => getDataCategoryFamily(flow.dataCategory) === "secret";
 
 // Do not let future secret categories silently become PS1005 failures. ASVS V14.3.3
 // excepts session tokens, so each automatically failing storage category must be

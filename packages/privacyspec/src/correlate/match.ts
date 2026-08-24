@@ -39,6 +39,7 @@ type DecodedCandidateCache = Map<string, readonly string[]>;
 
 interface FlowDestination {
   sinkKind: DataFlowSinkKind;
+  requestSurface: DataFlow["requestSurface"];
   recipient?: ClassifiedRecipient | undefined;
   method?: string | undefined;
   endpoint?: string | undefined;
@@ -242,6 +243,7 @@ const flowIdentity = (flow: DataFlow): string =>
     flow.sourceProvenance?.origin,
     flow.sourceProvenance?.endpoint,
     flow.sourceProvenance?.location,
+    flow.requestSurface,
     flow.sinkKind,
     flow.recipient?.origin,
     flow.recipient?.host,
@@ -267,6 +269,7 @@ const createFlow = (
     dataCategory: source.category,
     sourceKind: sourceKind(source),
     sourceConfidence: source.confidence,
+    requestSurface: destination.requestSurface,
     sinkKind: destination.sinkKind,
     location: sanitizeLabel(destination.location, sensitiveValues),
     transform: match.kind,
@@ -344,6 +347,7 @@ const correlateNetwork = (
       value,
       {
         sinkKind: networkSinkKind(prepared.recipient, location),
+        requestSurface: sink.requestSurface ?? "browser",
         recipient: prepared.recipient,
         method: isAmbientCookieLocation(location) ? undefined : sink.method,
         endpoint: isAmbientCookieLocation(location) ? undefined : prepared.endpoint,
@@ -397,7 +401,7 @@ const correlateConsole = (
       source,
       variants,
       value,
-      { sinkKind: "console", location },
+      { sinkKind: "console", requestSurface: "browser", location },
       test,
       sensitiveValues,
       flows,
@@ -436,7 +440,7 @@ const correlateStorage = (
     source,
     variants,
     sink.key,
-    { sinkKind: kind, location: "storage.key" },
+    { sinkKind: kind, requestSurface: "browser", location: "storage.key" },
     test,
     sensitiveValues,
     flows,
@@ -448,7 +452,7 @@ const correlateStorage = (
     source,
     variants,
     sink.value,
-    { sinkKind: kind, location: sink.key },
+    { sinkKind: kind, requestSurface: "browser", location: sink.key },
     test,
     sensitiveValues,
     flows,
@@ -476,6 +480,7 @@ const correlatePageUrl = (
       candidate.value,
       {
         sinkKind: "request-url",
+        requestSurface: "browser",
         recipient: prepared.recipient,
         endpoint: prepared.endpoint,
         location: candidate.location,

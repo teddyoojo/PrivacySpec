@@ -129,6 +129,11 @@ export interface SensitiveSourceLimitEvent {
   meta: RuntimeEventMeta;
 }
 
+export interface SensitiveSourceAmbiguousEvent {
+  type: "sensitive-source-ambiguous";
+  meta: RuntimeEventMeta;
+}
+
 export type RuntimeEvent =
   | ContextCreatedEvent
   | PageCreatedEvent
@@ -146,7 +151,8 @@ export type RuntimeEvent =
   | SensitiveSourceEvent
   | PageUrlSnapshotEvent
   | CollectorLimitEvent
-  | SensitiveSourceLimitEvent;
+  | SensitiveSourceLimitEvent
+  | SensitiveSourceAmbiguousEvent;
 
 export interface RuntimeEventMetaInput {
   context?: object | undefined;

@@ -16,6 +16,7 @@ test("endpoint canonicalization collapses generic dynamic segment families", () 
     ["/jobs/cmt3ab4cd5ef6gh7ij8kl9mn0", "/jobs/cmx9zy8wv7ut6sr5qp4on3ml2", "/jobs/:id"],
     ["/members/q7_amber_forest", "/members/m2_silver_harbor", "/members/:id"],
     ["/members/uy_amber_forest", "/members/nw_silver_harbor", "/members/:id"],
+    ["/members/vq_makenna_macgyver_", "/members/n2_myrtle_ortiz_", "/members/:id"],
     ["/members/q7_amber_forest.data", "/members/m2_silver_harbor.data", "/members/:id.data"],
   ];
 
@@ -30,6 +31,7 @@ test("endpoint canonicalization preserves semantically meaningful static routes"
     "/api/account-settings",
     "/api/privacy-policy",
     "/api/feature_flags",
+    "/api/feature_flags_",
     "/api/oauth/callback",
     "/api/v1/reports/daily",
     "/api/notes/new.data",

@@ -1,5 +1,6 @@
 import { createBaselineKey, isBaselineEligibleIdentity } from "../baseline/compare.js";
 import type { BaselineFlowIdentity } from "../baseline/schema.js";
+import { getDataCategoryFamily } from "../discovery/source-model.js";
 import type { InventoryEntry, InventoryFormat, PrivacyInventory } from "./model.js";
 
 const STATIC_ASSET_PREFIXES = ["/assets/", "/build/", "/static/", "/_next/static/"] as const;
@@ -23,7 +24,7 @@ const presentationEntries = (inventory: PrivacyInventory) => {
 };
 
 const reviewRuleId = (entry: InventoryEntry): BaselineFlowIdentity["ruleId"] | undefined => {
-  if (!entry.dataCategory.startsWith("personal.")) return undefined;
+  if (getDataCategoryFamily(entry.dataCategory) !== "personal") return undefined;
   if (entry.sinkKind === "request-url" || entry.location?.startsWith("url.") === true) {
     return "PS1001";
   }
@@ -62,7 +63,7 @@ const reviewSummary = (inventory: PrivacyInventory): string | undefined => {
 };
 
 const requestLabel = (entry: InventoryEntry): string =>
-  [entry.method, entry.recipient?.origin, entry.endpoint, entry.location]
+  [entry.requestSurface, entry.method, entry.recipient?.origin, entry.endpoint, entry.location]
     .filter((value): value is string => value !== undefined && value.length > 0)
     .join(" :: ");
 
@@ -169,8 +170,8 @@ export const renderInventoryMarkdown = (inventory: PrivacyInventory): string => 
   if (reviews !== undefined) lines.push(`- Review scope: ${reviews}`);
   lines.push(
     "",
-    "| Category | Boundary | Sink | Request/location | Sources | Transforms | State | Change | Occurrences | Tests |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | ---: | --- |",
+    "| Category | Surface | Boundary | Sink | Request/location | Sources | Transforms | State | Change | Occurrences | Tests |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | --- |",
   );
   if (presentation.staticAssetReferers.length > 0) {
     const entries = presentation.staticAssetReferers;
@@ -186,18 +187,18 @@ export const renderInventoryMarkdown = (inventory: PrivacyInventory): string => 
       ).values(),
     );
     lines.push(
-      `| ${categories.join(", ")} | FIRST_PARTY | request-header | ${entries.length} static-asset Referer inventory rows summarized (${new Set(entries.map((entry) => entry.endpoint)).size} endpoints) | ${sources.join(", ")} | ${transforms.join(", ")} | OBSERVED | — | ${occurrences} | ${markdownCell(visibleTestList(tests, 0))} |`,
+      `| ${categories.join(", ")} | browser | FIRST_PARTY | request-header | ${entries.length} static-asset Referer inventory rows summarized (${new Set(entries.map((entry) => entry.endpoint)).size} endpoints) | ${sources.join(", ")} | ${transforms.join(", ")} | OBSERVED | — | ${occurrences} | ${markdownCell(visibleTestList(tests, 0))} |`,
     );
   }
   for (const entry of presentation.entries) {
     const provenance = sourceProvenanceLabel(entry);
     const sources = `${entry.sourceKinds.join(", ")}${provenance === undefined ? "" : ` (${provenance})`}`;
     lines.push(
-      `| ${markdownCell(entry.dataCategory)} | ${entry.boundary} | ${entry.sinkKind} | ${markdownCell(requestLabel(entry) || "—")} | ${markdownCell(sources)} | ${entry.transforms.join(", ")} | ${entry.state} | ${entry.changeReasons.join(", ") || "—"} | ${entry.occurrences} | ${markdownCell(visibleTests(entry) || "—")} |`,
+      `| ${markdownCell(entry.dataCategory)} | ${entry.requestSurface} | ${entry.boundary} | ${entry.sinkKind} | ${markdownCell(requestLabel(entry) || "—")} | ${markdownCell(sources)} | ${entry.transforms.join(", ")} | ${entry.state} | ${entry.changeReasons.join(", ") || "—"} | ${entry.occurrences} | ${markdownCell(visibleTests(entry) || "—")} |`,
     );
   }
   if (inventory.entries.length === 0) {
-    lines.push("| — | — | — | No supported data flows observed | — | — | — | — | 0 | — |");
+    lines.push("| — | — | — | — | No supported data flows observed | — | — | — | — | 0 | — |");
   }
   if (inventory.resolved.length > 0) {
     lines.push("", `## Resolved baseline candidates (${inventory.resolved.length})`, "");
@@ -232,6 +233,7 @@ export const renderInventoryCsv = (inventory: PrivacyInventory): string => {
     "externalRecipients",
     "resolvedCandidates",
     "dataCategory",
+    "requestSurface",
     "boundary",
     "sinkKind",
     "recipient",
@@ -285,6 +287,7 @@ export const renderInventoryCsv = (inventory: PrivacyInventory): string => {
       "",
       "",
       "",
+      "",
     ]
       .map(csvCell)
       .join(","),
@@ -303,6 +306,7 @@ export const renderInventoryCsv = (inventory: PrivacyInventory): string => {
         inventory.summary.externalRecipients,
         inventory.resolved.length,
         entry.dataCategory,
+        entry.requestSurface,
         entry.boundary,
         entry.sinkKind,
         entry.recipient?.origin ?? "",

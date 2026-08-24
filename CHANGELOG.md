@@ -4,6 +4,76 @@ All notable changes to PrivacySpec are recorded here.
 
 ## Unreleased
 
+## 0.1.0-beta.3 — 2026-08-24
+
+### Added
+
+- Explicit custom-classifier compatibility IDs, persisted only as bounded semantic provenance in
+  privacy attachments, baselines/latest runs, and run parts, with mismatch/unavailable suppression
+  and an explicit whole-baseline migration path.
+- Bounded exact attachment v1–v5 parsing and public strict inventory/evidence v1/v2 object/file
+  readers with historical readable unions, canonical consistency checks, and symlink rejection.
+- Per-call API-request object capture budgets for depth, nodes, entries, locations, and retained
+  bytes, including fail-closed sparse/deep/cyclic/proxy handling and post-exhaustion body shutdown.
+
+- `privacyspec summary` with strict current-report input, backward-compatible terminal output, bounded
+  sanitized Markdown, deterministic actionable findings, and atomic private file output.
+- Public `renderSecondaryCoverageMarkdown` and `SecondaryCoverageSummaryFormat` exports.
+- A post-processing-only composite GitHub Action that writes the Step Summary and optionally
+  uploads the validated schema-v5 report from a private temporary staging file.
+- High-confidence DOM discovery for semantic name, postal-address, full birth-date, explicit
+  account-identifier, payment-card, gender-identity, and job-title controls, including semantic
+  select controls, corroborated metadata fallbacks, and bounded card/date validation.
+- Explicit reporter `runScope` mode with create-only private schema-v1 process/shard parts,
+  Playwright shard-coordinate validation, and collision-free run-specific default paths.
+- `privacyspec aggregate` and public strict part reader/pure aggregation API for deterministic
+  privacy, dependency, security, runtime, functional, performance, test-data, and coverage merging.
+- Complete-run-only four-module baseline comparison/latest-run eligibility, missing-part
+  diagnostics, duplicate/mismatch rejection, zero-test shard handling, and bounded hostile-input
+  protection.
+- `privacyspec baseline propose` and `baseline accept` with a separate strict schema-v1 proposal,
+  deterministic semantic selection IDs, four-module add/change/remove diffs, stale/tampered source
+  verification, explicit selective mutation, and preservation of unselected accepted entries.
+- Public baseline-proposal models, constants, typed errors, strict parser/reader/private writer,
+  pure proposal creation, and pure selective application APIs.
+- Bounded declarative DOM classifiers for application-specific custom personal/secret categories,
+  worker-side reclassification, built-in precedence, ambiguity fail-closed coverage, family-driven
+  rules, strict artifact/export propagation, and selective-proposal participation.
+- Explicit Firefox/WebKit and composed `request` fixture experiments with per-engine capability
+  tables, transparent seven-method API proxying, bounded argument/response-posture observation,
+  fixed blind spots, request-surface flows, and narrow controlled CI fixtures.
+
+### Changed
+
+- Attachments are now v5, run parts v3, and privacy baselines/latest-run handoffs v2. Unified
+  reports remain v5 and inventory/evidence remain v2; proposal and independent analyzer contracts
+  remain v1. All supported historical versions retain strict readers, and mixed run-part versions
+  reject.
+- Legacy attachments and run parts expose unavailable classifier provenance rather than inferred
+  compatibility. Legacy v1 privacy artifacts with custom categories require a fresh run and
+  explicit whole-baseline reacceptance; matcher literals/tables/digests are never persisted.
+- Endpoint canonicalization now collapses bounded random-prefix structured instance handles that
+  end in a delimiter, preventing generated path values from creating unstable security identities.
+
+- Strict report, baseline, test-data, inventory, and evidence validation accepts built-in and
+  validated custom categories through the shared category-family helpers.
+- DOM classification keeps the six-character correlation floor and excludes generic identifiers,
+  arbitrary person/address recognition, short DOB/card components, and API/session/JWT tokens.
+  First-party JSON response discovery remains limited to email and phone.
+- Custom source expansion remains DOM-control-only; response, storage, cookie, URL, and JavaScript
+  source surfaces remain closed.
+- Detected Playwright sharding without explicit `runScope` now fails closed and disables colliding
+  single-writer report/latest paths. The GitHub Action remains post-processing-only; repository CI
+  now produces two controlled shard parts and aggregates them before the Action smoke test.
+- Unified reports became schema v5 and inventory/evidence became v2 in the secondary-coverage
+  expansion; the current release-hardening version map above supersedes the earlier attachment,
+  run-part, and privacy baseline/latest versions.
+- The package CLI now uses a tracked executable launcher so fresh workspace installs create the
+  `privacyspec` shim before `dist` is built, including the local GitHub Action smoke path.
+- Baseline proposal creation is read-only; selective and compatible whole-snapshot mutation remain
+  local, confirmed, and CI-disabled. Proposal/selective paths reject collisions and symlinks, and
+  proposal/baseline writes remain atomic and private.
+
 ## 0.1.0-beta.2 — 2026-08-22
 
 ### Added
@@ -73,7 +143,7 @@ All notable changes to PrivacySpec are recorded here.
   remain distinct.
 - Raw browser-event counts can vary without changing semantic coverage. A relevant application-level
   cancellation may require review if it appears only as a filtered benign abort.
-- The release candidate passed the complete independent repository validation matrix.
+- The release candidate passed the complete independent repository matrix.
 
 ### Compatibility
 

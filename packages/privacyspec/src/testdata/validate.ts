@@ -1,5 +1,5 @@
 import type { DataFlowSourceKind } from "../correlate/model.js";
-import type { DataCategory } from "../discovery/source-model.js";
+import { type DataCategory, isDataCategory } from "../discovery/source-model.js";
 import {
   type PrivacySpecTestDataAttachment,
   type PrivacySpecTestDataSection,
@@ -22,9 +22,8 @@ const signals = new Set<TestDataSignal>([
   "UNSUPPORTED_CATEGORY",
   "UNSUPPORTED_SOURCE_KIND",
 ]);
-const categories = new Set<DataCategory>(["personal.email", "personal.phone", "secret.password"]);
 const sourceKinds = new Set<DataFlowSourceKind>(["form-input", "dom-control", "response-json"]);
-const elementKinds = new Set(["input", "textarea", "contenteditable"]);
+const elementKinds = new Set(["input", "textarea", "select", "contenteditable"]);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -95,7 +94,7 @@ export const parseTestDataObservation = (value: unknown): TestDataObservation | 
     !signals.has(value.signal as TestDataSignal) ||
     !validVerdictSignal(value.verdict as TestDataVerdict, value.signal as TestDataSignal) ||
     typeof value.category !== "string" ||
-    !categories.has(value.category as DataCategory) ||
+    !isDataCategory(value.category) ||
     typeof value.sourceKind !== "string" ||
     !sourceKinds.has(value.sourceKind as DataFlowSourceKind) ||
     !isRecord(value.attribution) ||

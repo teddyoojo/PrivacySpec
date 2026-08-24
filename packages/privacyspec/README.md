@@ -26,7 +26,24 @@ import { withPrivacySpec } from "@privacyspec/playwright";
 
 export const test = withPrivacySpec(projectTest, {
   firstParty: { origins: ["https://app.example.test"] },
-  sources: { firstPartyJsonResponses: true }, // experimental; defaults to false
+  sources: {
+    firstPartyJsonResponses: true,
+    customClassifierConfigurationId: "acme-dom-classifiers-v1",
+    customClassifiers: [
+      {
+        category: { id: "custom.personal.acme.member_id", family: "personal" },
+        sourceSurface: "dom-control",
+        confidence: "medium",
+        sanitization: "bounded-control-metadata",
+        match: { kind: "exact", alternatives: [{ field: "name", equals: "memberId" }] },
+        value: { minLength: 6, maxLength: 128 },
+      },
+    ],
+  },
+  experimental: {
+    browserEngines: ["firefox", "webkit"],
+    apiRequestContext: "request-fixture",
+  },
   testData: { syntheticEmailDomains: ["test-data.my-company.internal"] },
 });
 ```
@@ -51,17 +68,38 @@ export default defineConfig({
 ```
 
 The package also exports a precomposed `test` and Playwright `expect` for simple repositories.
+Non-empty custom classifier tables require a bounded `customClassifierConfigurationId`. Reuse it
+only for reorder-equivalent tables and rotate it for semantic changes. Only the ID is persisted;
+matcher literals/tables and automatic matcher digests are not. It is distinct from
+`runScope.configurationId`, which coordinates one sharded/process execution.
+
+For shards or coordinated processes, configure `runScope` with a shared bounded `runId` and
+`configurationId`. Playwright shard metadata supplies the coordinate, or a caller may provide a
+paired one-based `part`/`total` (maximum 128). Each invocation writes only a private,
+baseline-ineligible `.privacyspec-parts/<runId>/part-<part>-of-<total>.json`. Run
+`privacyspec aggregate` with every explicit part path before publishing or updating a baseline.
+Missing parts are `INCONCLUSIVE`; invalid, duplicate, and mismatched parts are integration errors.
 
 PrivacySpec instruments Playwright's test-scoped `context` and wraps the composed worker-scoped
-`browser` fixture. Report schema v4 retains the aggregate observation counters from schema v3 and
-adds namespaced `analysis.privacy`, `analysis.dependencies`, `analysis.security`, and
+`browser` fixture. Report schema v5 retains schema-v4 analysis and adds browser-engine/API coverage
+and request-surface facts alongside namespaced `analysis.privacy`, `analysis.dependencies`, `analysis.security`, and
 `analysis.runtimeErrors` sections. Terminal output presents functional tests, observation
 coverage, the four module outcomes, and a bounded change total as one secondary-coverage
-hierarchy. Report schemas v1–v3 remain readable; the independent module artifacts and baselines
-remain schema v1. Contexts created through `browser.newContext()` or `browser.newPage()` are
-detected but are not instrumented. An all-custom or mixed suite therefore fails closed with
-`COVERAGE_INCOMPATIBLE` and an inconclusive module result. Browser instances launched outside the
-composed fixture remain outside this detection boundary.
+hierarchy. Current writers use report v5, attachment v5, run-part v3, privacy baseline/latest v2,
+inventory/evidence v2, and proposal/independent analyzer v1. Strict historical readers cover
+report/attachment v1–v5, run-part v1–v3, privacy baseline/latest v1–v2, and inventory/evidence
+v1–v2. Contexts created through
+`browser.newContext()` or `browser.newPage()` are detected but are not instrumented. An all-custom
+or mixed suite therefore fails closed with `COVERAGE_INCOMPATIBLE` and an inconclusive module
+result. Browser instances launched outside the composed fixture remain outside this detection
+boundary.
+
+Chromium remains supported by default. Firefox and WebKit instrumentation require an explicit
+experimental gate; ungated tests remain functionally runnable but fail closed with unsupported
+secondary coverage. The optional composed `request` fixture proxy is transparent, never reads API
+response bodies, does not discover new sensitive sources, and marks every detected API call
+partial and baseline-ineligible. Calls through `page.request`, `context.request`, or manually
+created request contexts remain undetectable.
 
 For source-free network-heavy tests, queryless static `GET`/`HEAD` requests and narrowly recognized
 Vite development-module requests are counted but not retained until a supported source is observed;
@@ -75,7 +113,12 @@ identity per test, origin, cookie name, and transform.
 ```bash
 privacyspec explain PS1001
 privacyspec baseline show
+privacyspec baseline propose
+privacyspec baseline accept --select <proposal-id>
 privacyspec baseline update
+privacyspec aggregate --part path/to/part-1.json --part path/to/part-2.json
+privacyspec summary
+privacyspec summary --format markdown --output privacyspec-summary.md
 privacyspec inventory
 privacyspec inventory --format markdown --output privacy-inventory.md
 privacyspec testdata
@@ -86,8 +129,40 @@ privacyspec evidence --commit <commit-id> --build-id <build-id>
 privacyspec evidence --format markdown --output technical-evidence.md
 ```
 
-`baseline update` requires a complete latest run and explicit confirmation. It refuses mutation in
-CI. Objective technical failures cannot be accepted into the baseline.
+`baseline propose` reads a strict complete latest run and the selected module baseline, then writes
+a private schema-v1 proposal without changing accepted state. `baseline accept` revalidates those
+snapshots and applies only exact repeated `--select` IDs, preserving every unselected accepted
+entry. It requires confirmation (or `--yes`) and refuses CI. `baseline update` remains the
+compatible confirmed whole-snapshot replacement command and the explicit migration path after a
+custom-classifier ID rotation. Mismatch/unavailable state suppresses privacy known/new/resolved and
+selective proposals; legacy v1 privacy artifacts containing custom categories require a fresh
+current run and explicit whole-snapshot reacceptance. Objective privacy technical failures cannot
+become privacy baseline entries; other modules retain their documented independent semantics.
+
+The package root exports the strict proposal model/parser/reader/private writer, pure proposal
+creation and selective-application functions, schema/default/limit constants, discriminated
+snapshot/application types, and typed proposal errors.
+
+`aggregate` accepts 1–128 explicit `--part` paths, reads the existing four baseline defaults, and
+writes one strict schema-v5 report plus complete or fail-closed latest-run handoffs. It performs no
+directory crawling, glob expansion, baseline mutation, service call, or telemetry. Valid semantic
+results—including incomplete scope—return `0`; parser, mismatch, collision, and output errors
+return `1`.
+
+`summary` reads only a strict current schema-v5 unified report and defaults to terminal stdout.
+It also supports bounded Markdown and an atomic mode-`0600` `--output`. Valid `PASS`, `REVIEW`,
+`FAIL`, and `INCONCLUSIVE` report statuses return exit code `0`; malformed, missing, unsupported,
+or unwritable input returns `1`. The command is a renderer and does not redefine reporter failure
+policy. The package root exports `renderSecondaryCoverageSummary`,
+`renderSecondaryCoverageMarkdown`, and `SecondaryCoverageSummaryFormat`.
+
+The official repository Action is post-processing only: install this package, run Playwright,
+aggregate expected parts when sharding, then invoke
+`teddyoojo/PrivacySpec@<approved-release-ref>` with `if: always()`. It validates and renders the
+report with the caller's local CLI and can upload the sanitized schema-v5 JSON artifact. It
+does not install dependencies or browsers, mutate baselines, or make a valid report's semantic
+status fail the Action independently. It does not discover or aggregate shards. Use an approved
+release ref once publication is authorized.
 
 `inventory` reads `privacyspec-report.json` unless `--report <path>` is supplied. It supports
 terminal, JSON, CSV, and Markdown output; `--output` writes atomically with mode `0600`. It
@@ -131,11 +206,22 @@ Control-to-sink correlation is scoped to one isolated Playwright test and establ
 co-observation, not temporal causation; asynchronous browser-to-worker delivery order is not used
 as a clock. Response-discovered sources remain restricted to later sinks.
 
-The beta supports Chromium and Playwright `>=1.58.1 <2`. It discovers high-confidence email,
-telephone, and password controls and observes browser-side network, storage, console, and URL
-flows. Experimental first-party JSON response discovery is opt-in and recognizes only valid email
-and phone values under explicit JSON-key semantics. It does not observe backend-only transfers and
-is not a legal compliance certification tool. Its inventory is technical input to privacy review,
-not a complete GDPR Article 30 record of processing activities.
+The stable beta supports Chromium and Playwright `>=1.58.1 <2`; Firefox/WebKit and the composed
+request fixture remain opt-in experiments. It discovers high-confidence email,
+telephone, password, name, postal-address, full birth-date, explicit account-identifier,
+payment-card, gender-identity, and job-title controls and observes browser-side network, storage,
+console, and URL flows. Expanded categories require exact autocomplete intent or corroborated
+machine/accessibility metadata; gender identity and job title are autocomplete-only. Card/DOB
+values also use bounded structural checks, and all correlated sources keep the six-character
+minimum. Generic IDs, ordinary name-like text, short card-security/date components, and API/session
+tokens remain unclassified. `personal.*` categories are technical observations, not PCI,
+special-category, or other legal determinations. Experimental first-party JSON response discovery
+is opt-in and still recognizes only valid email and phone values under explicit JSON-key semantics.
+Application-specific categories use bounded exact declarative DOM classifiers. Custom personal
+categories may be high or medium confidence; custom secrets require corroborated high confidence.
+Callbacks, regular expressions, selectors, and custom response/storage/URL/JavaScript discovery
+are not supported, and built-ins always win. PrivacySpec does not observe backend-only transfers
+and is not a legal compliance certification tool. Its inventory is technical input to privacy
+review, not a complete GDPR Article 30 record of processing activities.
 
 See the repository README and API/privacy documentation for the complete beta contract.

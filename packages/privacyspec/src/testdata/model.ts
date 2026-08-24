@@ -56,7 +56,7 @@ export interface PrivacySpecTestDataReport extends PrivacySpecTestDataSection {
     version: string;
   };
   sourceReport: {
-    schemaVersion: 1 | 2 | 3 | 4;
+    schemaVersion: 1 | 2 | 3 | 4 | 5;
     generatedAt: string;
     complete: boolean;
     status: "passed" | "review" | "failed" | "incomplete";

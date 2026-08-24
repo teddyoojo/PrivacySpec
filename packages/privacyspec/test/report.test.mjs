@@ -36,6 +36,7 @@ const reviewFinding = () => ({
   observation: "personal.email was observed leaving the configured first-party boundary.",
   flow: {
     kind: "data-flow",
+    requestSurface: "browser",
     dataCategory: "personal.email",
     sourceKind: "form-input",
     sourceConfidence: "high",
@@ -61,6 +62,16 @@ const reviewFinding = () => ({
 const attachmentWith = (...observations) => {
   const result = createEmptyPrivacySpecResult();
   result.observations.push(...observations);
+  if (
+    observations.some(
+      (observation) =>
+        observation?.category?.startsWith?.("custom.") ||
+        observation?.dataCategory?.startsWith?.("custom.") ||
+        observation?.flow?.dataCategory?.startsWith?.("custom."),
+    )
+  ) {
+    result.classifierConfiguration = { mode: "custom", id: "test-custom-classifiers-v1" };
+  }
   return {
     name: PRIVACYSPEC_ATTACHMENT_NAME,
     contentType: PRIVACYSPEC_ATTACHMENT_CONTENT_TYPE,
@@ -105,7 +116,7 @@ const fullResult = (status = "passed", duration = 500) => ({
   duration,
 });
 
-test("schema-v4 JSON report unifies module outcomes with privacy evidence and performance", async (t) => {
+test("schema-v5 JSON report unifies module outcomes with privacy evidence and performance", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "privacyspec-json-report-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const reportPath = join(directory, "privacyspec-report.json");
@@ -127,10 +138,10 @@ test("schema-v4 JSON report unifies module outcomes with privacy evidence and pe
         attachmentWith(
           {
             kind: "sensitive-source",
-            raw: rawFixtureValue,
             category: "personal.email",
             confidence: "high",
             evidence: [{ kind: "input-type", value: "email" }],
+            sourceKind: "form-input",
             control: { elementKind: "input", type: "email" },
             page: { origin: "https://app.example.test", path: "/customers/new" },
             observedBy: "event",
@@ -138,14 +149,16 @@ test("schema-v4 JSON report unifies module outcomes with privacy evidence and pe
           {
             kind: "sink",
             sink: "network",
+            requestSurface: "browser",
             method: "POST",
             resourceType: "fetch",
-            recipient: finding.flow.recipient,
+            recipient: {
+              origin: finding.flow.recipient.origin,
+              host: finding.flow.recipient.host,
+            },
             endpoint: "/event",
-            bodyKind: "json",
-            bodySize: 42,
-            bodyTruncated: false,
             locations: ["json.email"],
+            body: { kind: "json", size: 42, truncated: false },
           },
           finding.flow,
           finding,
@@ -159,8 +172,8 @@ test("schema-v4 JSON report unifies module outcomes with privacy evidence and pe
   const report = JSON.parse(serialized);
   const metadata = await stat(reportPath);
 
-  assert.equal(report.schemaVersion, 4);
-  assert.deepEqual(report.tool, { name: "privacyspec", version: "0.1.0-beta.2" });
+  assert.equal(report.schemaVersion, 5);
+  assert.deepEqual(report.tool, { name: "privacyspec", version: "0.1.0-beta.3" });
   assert.equal(report.generatedAt, "2026-08-20T12:00:00.500Z");
   assert.equal(report.run.playwrightStatus, "passed");
   assert.equal(report.run.privacyspecStatus, "review");
@@ -241,11 +254,85 @@ test("schema-v4 JSON report unifies module outcomes with privacy evidence and pe
   assert.match(rendered, /EU relevance PS1004: GDPR Article 5\(1\)\(c\)/u);
   assert.match(rendered, /authoritative sources PS1004: .*github\.com.*eur-lex/u);
   assert.match(rendered, /performance: suite=500ms, cumulative test duration=125ms/u);
-  assert.match(rendered, /JSON report: .*privacyspec-report\.json \(schema v4\)/u);
+  assert.match(rendered, /JSON report: .*privacyspec-report\.json \(schema v5\)/u);
   assert.match(
     rendered,
     /result: REVIEW \(functional tests=PASS, changes=1, technical failures=0, review findings=1\)/u,
   );
+
+  const inconsistentCountsPath = join(directory, "inconsistent-engine-counts.json");
+  const inconsistentCounts = structuredClone(report);
+  inconsistentCounts.coverage.browserEngines.tests.supported = 0;
+  inconsistentCounts.coverage.browserEngines.tests.experimental = 1;
+  await writeFile(inconsistentCountsPath, JSON.stringify(inconsistentCounts), "utf8");
+  await assert.rejects(() => readPrivacySpecReport(inconsistentCountsPath));
+
+  const limitedCapabilityPath = join(directory, "limited-engine-capability.json");
+  const limitedCapability = structuredClone(report);
+  limitedCapability.coverage.browserEngines.engines.chromium.capabilities.network = "partial";
+  await writeFile(limitedCapabilityPath, JSON.stringify(limitedCapability), "utf8");
+  await assert.rejects(() => readPrivacySpecReport(limitedCapabilityPath));
+});
+
+test("schema-v5 strict reporting accepts built-in and validated custom DOM data categories", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "privacyspec-expanded-taxonomy-report-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const reportPath = join(directory, "privacyspec-report.json");
+  const categories = [
+    "personal.name",
+    "personal.postal_address",
+    "personal.date_of_birth",
+    "personal.account_identifier",
+    "personal.payment_card",
+    "personal.gender_identity",
+    "personal.job_title",
+    "custom.personal.acme.benefit_code",
+    "custom.secret.acme.employee_pin",
+  ];
+  const flowTemplate = reviewFinding().flow;
+  const observations = categories.flatMap((category) => [
+    {
+      kind: "sensitive-source",
+      category,
+      confidence: "high",
+      evidence: [{ kind: "autocomplete", value: "semantic-fixture" }],
+      sourceKind: "form-input",
+      control: { elementKind: "input" },
+      page: { origin: "https://app.example.test", path: "/profile" },
+      observedBy: "event",
+    },
+    {
+      ...flowTemplate,
+      dataCategory: category,
+      sinkKind: "request-body",
+      recipient: {
+        origin: "https://app.example.test",
+        host: "app.example.test",
+        firstParty: true,
+      },
+      endpoint: "/profile",
+      location: `json.${category.replaceAll(".", "_")}`,
+    },
+  ]);
+  const reporter = new PrivacySpecReporter({
+    baselinePath: false,
+    latestRunPath: false,
+    reportPath,
+    write: () => {},
+  });
+
+  reporter.onBegin({ projects: [{ name: "chromium" }] });
+  reporter.onTestEnd(testCase, testResult(completeAttachments(attachmentWith(...observations))));
+  assert.equal(await reporter.onEnd(fullResult()), undefined);
+
+  const report = await readPrivacySpecReport(reportPath);
+  assert.deepEqual(
+    report.flows.map((flow) => flow.dataCategory),
+    categories.toSorted(),
+  );
+  for (const category of categories) {
+    assert.equal(report.summary.sensitiveSources.byName[category], 1, category);
+  }
 });
 
 test("bounded optional observer skips produce partial inconclusive coverage", async (t) => {
@@ -339,7 +426,7 @@ test("observer finalization timeout makes coverage incomplete", async (t) => {
   assert.match(output.join(""), /Secondary coverage: INCONCLUSIVE/u);
 });
 
-test("schema-v4 report persists only sanitized test-data hygiene semantics", async (t) => {
+test("schema-v5 report persists only sanitized test-data hygiene semantics", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "privacyspec-testdata-report-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const reportPath = join(directory, "privacyspec-report.json");

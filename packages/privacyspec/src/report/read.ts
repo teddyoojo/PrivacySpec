@@ -1,4 +1,4 @@
-import { readFile, stat } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import { parseDependencyReport } from "../analyzers/dependency/artifact.js";
 import type { DependencyReport } from "../analyzers/dependency/model.js";
@@ -18,7 +18,7 @@ import type {
   BaselineFlowIdentity,
 } from "../baseline/schema.js";
 import type { DataFlow, DataFlowSinkKind, TransformKind } from "../correlate/model.js";
-import type { DataCategory } from "../discovery/source-model.js";
+import { type DataCategory, isDataCategory } from "../discovery/source-model.js";
 import { RULE_DEFINITIONS } from "../rules/definitions.js";
 import type { Finding, RuleId } from "../rules/model.js";
 import { parseTestDataSection } from "../testdata/validate.js";
@@ -31,11 +31,13 @@ import {
   type PrivacySpecJsonReportV2,
   type PrivacySpecJsonReportV3,
   type PrivacySpecJsonReportV4,
+  type PrivacySpecJsonReportV5,
   type PrivacySpecRunStatus,
   REPORT_SCHEMA_VERSION,
   REPORT_SCHEMA_VERSION_V1,
   REPORT_SCHEMA_VERSION_V2,
   REPORT_SCHEMA_VERSION_V3,
+  REPORT_SCHEMA_VERSION_V4,
   type TestAttemptStatus,
 } from "./model.js";
 
@@ -62,11 +64,6 @@ const MAX_FINDING_TEXT_LENGTH = 2_048;
 const MAX_FINDING_LIMITATIONS = 10;
 const MAX_DIAGNOSTIC_LENGTH = 1_024;
 
-const dataCategories = new Set<DataCategory>([
-  "personal.email",
-  "personal.phone",
-  "secret.password",
-]);
 const sourceKindsV1 = new Set<DataFlow["sourceKind"]>(["form-input", "dom-control"]);
 const sourceKindsV2 = new Set<DataFlow["sourceKind"]>([
   "form-input",
@@ -195,6 +192,7 @@ type SupportedReportSchemaVersion =
   | typeof REPORT_SCHEMA_VERSION_V1
   | typeof REPORT_SCHEMA_VERSION_V2
   | typeof REPORT_SCHEMA_VERSION_V3
+  | typeof REPORT_SCHEMA_VERSION_V4
   | typeof REPORT_SCHEMA_VERSION;
 
 const parseDataFlow = (
@@ -205,20 +203,32 @@ const parseDataFlow = (
     !isRecord(value) ||
     !hasExactKeys(
       value,
-      ["kind", "dataCategory", "sourceKind", "sourceConfidence", "sinkKind", "transform", "test"],
+      [
+        "kind",
+        ...(schemaVersion === REPORT_SCHEMA_VERSION ? ["requestSurface"] : []),
+        "dataCategory",
+        "sourceKind",
+        "sourceConfidence",
+        "sinkKind",
+        "transform",
+        "test",
+      ],
       schemaVersion !== REPORT_SCHEMA_VERSION_V1
         ? ["recipient", "method", "endpoint", "location", "sourceProvenance"]
         : ["recipient", "method", "endpoint", "location"],
     ) ||
     value.kind !== "data-flow" ||
     typeof value.dataCategory !== "string" ||
-    !dataCategories.has(value.dataCategory as DataCategory) ||
+    !isDataCategory(value.dataCategory) ||
     typeof value.sourceKind !== "string" ||
     !(schemaVersion !== REPORT_SCHEMA_VERSION_V1 ? sourceKindsV2 : sourceKindsV1).has(
       value.sourceKind as DataFlow["sourceKind"],
     ) ||
     typeof value.sourceConfidence !== "string" ||
     !sourceConfidences.has(value.sourceConfidence as DataFlow["sourceConfidence"]) ||
+    (schemaVersion === REPORT_SCHEMA_VERSION &&
+      value.requestSurface !== "browser" &&
+      value.requestSurface !== "api-request") ||
     typeof value.sinkKind !== "string" ||
     !sinkKinds.has(value.sinkKind as DataFlowSinkKind) ||
     typeof value.transform !== "string" ||
@@ -287,6 +297,10 @@ const parseDataFlow = (
 
   const flow: DataFlow = {
     kind: "data-flow",
+    requestSurface:
+      schemaVersion === REPORT_SCHEMA_VERSION
+        ? (value.requestSurface as DataFlow["requestSurface"])
+        : "browser",
     dataCategory: value.dataCategory as DataCategory,
     sourceKind: value.sourceKind as DataFlow["sourceKind"],
     sourceConfidence: value.sourceConfidence as DataFlow["sourceConfidence"],
@@ -314,6 +328,7 @@ const dataFlowIdentity = (flow: DataFlow): string =>
     flow.sourceProvenance?.origin ?? null,
     flow.sourceProvenance?.endpoint ?? null,
     flow.sourceProvenance?.location ?? null,
+    flow.requestSurface,
     flow.sinkKind,
     flow.recipient?.origin ?? null,
     flow.recipient?.host ?? null,
@@ -389,7 +404,7 @@ const parseBaselineCandidate = (
     typeof value.ruleId !== "string" ||
     !ruleIds.has(value.ruleId as RuleId) ||
     typeof value.dataCategory !== "string" ||
-    !dataCategories.has(value.dataCategory as DataCategory) ||
+    !isDataCategory(value.dataCategory) ||
     typeof value.sinkKind !== "string" ||
     !sinkKinds.has(value.sinkKind as DataFlowSinkKind) ||
     typeof value.transform !== "string" ||
@@ -539,10 +554,21 @@ const isBoundedSafeJson = (value: unknown): boolean => {
   return visit(value, 0);
 };
 
-const parseResponseReportCoverage = (value: unknown, observedTests: number): boolean => {
+const parseResponseReportCoverage = (
+  value: unknown,
+  observedTests: number,
+  schemaVersion: SupportedReportSchemaVersion,
+): boolean => {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ["firstPartyJsonResponses"], ["playwright", "network", "observation"]) ||
+    !hasExactKeys(
+      value,
+      [
+        "firstPartyJsonResponses",
+        ...(schemaVersion === REPORT_SCHEMA_VERSION ? ["browserEngines", "apiRequests"] : []),
+      ],
+      ["playwright", "network", "observation"],
+    ) ||
     !isRecord(value.firstPartyJsonResponses)
   ) {
     return false;
@@ -590,6 +616,138 @@ const parseResponseReportCoverage = (value: unknown, observedTests: number): boo
   );
 };
 
+const browserEngineNames = ["chromium", "firefox", "webkit"] as const;
+const browserCapabilityNames = [
+  "init-scripts",
+  "events",
+  "teardown-fallback",
+  "network",
+  "console",
+  "storage",
+  "cookies",
+  "response-headers",
+  "page-errors",
+] as const;
+const runtimeCapabilityStates = new Set([
+  "complete",
+  "partial",
+  "incomplete",
+  "unsupported",
+  "disabled",
+]);
+
+export const parseBrowserEngineReportCoverage = (
+  value: unknown,
+  observedTests: number,
+): boolean => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["experimental", "tests", "engines"]) ||
+    value.experimental !== true ||
+    !hasNonNegativeCounts(value.tests, [
+      "supported",
+      "experimental",
+      "unsupported",
+      "unavailable",
+    ]) ||
+    value.tests.supported +
+      value.tests.experimental +
+      value.tests.unsupported +
+      value.tests.unavailable !==
+      observedTests ||
+    !isRecord(value.engines) ||
+    !hasExactKeys(value.engines, browserEngineNames)
+  ) {
+    return false;
+  }
+  let engineTests = 0;
+  const supportTests = { supported: 0, experimental: 0, unsupported: 0 };
+  for (const engine of browserEngineNames) {
+    const coverage = value.engines[engine];
+    if (
+      !isRecord(coverage) ||
+      !hasExactKeys(coverage, ["tests", "support", "capabilities"]) ||
+      !isNonNegativeInteger(coverage.tests) ||
+      !["supported", "experimental", "unsupported"].includes(String(coverage.support)) ||
+      !isRecord(coverage.capabilities) ||
+      !hasExactKeys(coverage.capabilities, browserCapabilityNames) ||
+      !browserCapabilityNames.every((name) =>
+        runtimeCapabilityStates.has(
+          (coverage.capabilities as Record<string, unknown>)[name] as string,
+        ),
+      )
+    ) {
+      return false;
+    }
+    if (
+      (engine === "chromium" && coverage.support !== "supported") ||
+      (engine !== "chromium" && coverage.support === "supported") ||
+      (coverage.support === "unsupported" &&
+        browserCapabilityNames.some(
+          (name) => (coverage.capabilities as Record<string, unknown>)[name] !== "unsupported",
+        ))
+    ) {
+      return false;
+    }
+    engineTests += coverage.tests;
+    supportTests[coverage.support as keyof typeof supportTests] += coverage.tests;
+  }
+  return (
+    engineTests + value.tests.unavailable === observedTests &&
+    supportTests.supported === value.tests.supported &&
+    supportTests.experimental === value.tests.experimental &&
+    supportTests.unsupported === value.tests.unsupported
+  );
+};
+
+const apiBlindSpots = [
+  "implicit-headers-cookies-auth",
+  "redirect-chain",
+  "page-request",
+  "context-request",
+  "manual-request-context",
+] as const;
+
+export const parseAPIRequestReportCoverage = (value: unknown, observedTests: number): boolean => {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["experimental", "tests", "calls", "skipped", "blindSpots"]) ||
+    value.experimental !== true ||
+    !hasNonNegativeCounts(value.tests, [
+      "enabled",
+      "disabled",
+      "unavailable",
+      "complete",
+      "partial",
+      "unsupported",
+    ]) ||
+    value.tests.enabled + value.tests.disabled + value.tests.unavailable !== observedTests ||
+    value.tests.complete +
+      value.tests.partial +
+      value.tests.unsupported +
+      value.tests.unavailable !==
+      observedTests ||
+    !hasNonNegativeCounts(value.calls, ["seen", "observed", "failed", "serverErrors"]) ||
+    value.calls.observed + value.calls.failed > value.calls.seen ||
+    value.calls.serverErrors > value.calls.observed ||
+    !hasNonNegativeCounts(value.skipped, [
+      "accessors",
+      "streams",
+      "files",
+      "unsupportedObjects",
+      "oversized",
+      "aggregateLimit",
+      "sinkLimit",
+      "materialLimit",
+    ]) ||
+    !Array.isArray(value.blindSpots) ||
+    !isDeepStrictEqual(value.blindSpots, apiBlindSpots)
+  ) {
+    return false;
+  }
+  return true;
+};
+
 const parseNetworkReportCoverage = (value: unknown): boolean => {
   if (
     !isRecord(value) ||
@@ -627,6 +785,10 @@ const observationCoverageDiagnosticCodes = new Set([
   "COVERAGE_RESULT_UNAVAILABLE",
   "COVERAGE_TEST_SCOPE_INCOMPLETE",
   "COVERAGE_UNSUPPORTED_CONTEXT",
+  "COVERAGE_UNSUPPORTED_BROWSER_ENGINE",
+  "COVERAGE_BROWSER_ENGINE_CAPABILITY_LIMITED",
+  "COVERAGE_API_REQUEST_PARTIAL",
+  "COVERAGE_API_REQUEST_UNSUPPORTED",
 ]);
 
 const parseObservationReportCoverage = (
@@ -754,6 +916,7 @@ const parseReport = (value: unknown): value is PrivacySpecJsonReport => {
     value.schemaVersion !== REPORT_SCHEMA_VERSION_V1 &&
     value.schemaVersion !== REPORT_SCHEMA_VERSION_V2 &&
     value.schemaVersion !== REPORT_SCHEMA_VERSION_V3 &&
+    value.schemaVersion !== REPORT_SCHEMA_VERSION_V4 &&
     value.schemaVersion !== REPORT_SCHEMA_VERSION
   ) {
     return false;
@@ -773,7 +936,9 @@ const parseReport = (value: unknown): value is PrivacySpecJsonReport => {
     "integrationErrors",
     "legalMappings",
     ...(schemaVersion !== REPORT_SCHEMA_VERSION_V1 ? ["coverage"] : []),
-    ...(schemaVersion === REPORT_SCHEMA_VERSION ? ["analysis"] : []),
+    ...(schemaVersion === REPORT_SCHEMA_VERSION_V4 || schemaVersion === REPORT_SCHEMA_VERSION
+      ? ["analysis"]
+      : []),
   ];
   if (
     !hasExactKeys(
@@ -862,6 +1027,7 @@ const parseReport = (value: unknown): value is PrivacySpecJsonReport => {
       !parseResponseReportCoverage(
         value.coverage,
         (value.run.tests as { observed: number }).observed,
+        schemaVersion,
       )) ||
     (schemaVersion !== REPORT_SCHEMA_VERSION_V1 &&
       isRecord(value.coverage) &&
@@ -877,13 +1043,25 @@ const parseReport = (value: unknown): value is PrivacySpecJsonReport => {
     (schemaVersion === REPORT_SCHEMA_VERSION_V2 &&
       isRecord(value.coverage) &&
       value.coverage.observation !== undefined) ||
-    ((schemaVersion === REPORT_SCHEMA_VERSION_V3 || schemaVersion === REPORT_SCHEMA_VERSION) &&
+    ((schemaVersion === REPORT_SCHEMA_VERSION_V3 ||
+      schemaVersion === REPORT_SCHEMA_VERSION_V4 ||
+      schemaVersion === REPORT_SCHEMA_VERSION) &&
       isRecord(value.coverage) &&
       !parseObservationReportCoverage(
         value.coverage.observation,
         (value.run.tests as { total: number }).total,
         (value.run.tests as { observed: number }).observed,
       )) ||
+    (schemaVersion === REPORT_SCHEMA_VERSION &&
+      isRecord(value.coverage) &&
+      (!parseBrowserEngineReportCoverage(
+        value.coverage.browserEngines,
+        (value.run.tests as { observed: number }).observed,
+      ) ||
+        !parseAPIRequestReportCoverage(
+          value.coverage.apiRequests,
+          (value.run.tests as { observed: number }).observed,
+        ))) ||
     (schemaVersion !== REPORT_SCHEMA_VERSION_V1 &&
       value.testData !== undefined &&
       parseTestDataSection(value.testData) === undefined)
@@ -892,9 +1070,11 @@ const parseReport = (value: unknown): value is PrivacySpecJsonReport => {
   }
 
   const flowIdentities = new Set<string>();
+  const parsedFlows: DataFlow[] = [];
   for (const flowValue of value.flows) {
     const flow = parseDataFlow(flowValue, schemaVersion);
     if (flow === undefined) return false;
+    parsedFlows.push(flow);
     flowIdentities.add(dataFlowIdentity(flow));
   }
 
@@ -927,7 +1107,8 @@ const parseReport = (value: unknown): value is PrivacySpecJsonReport => {
     if (finding === undefined || !flowIdentities.has(dataFlowIdentity(finding.flow))) return false;
     const candidate = createBaselineFlowCandidate(finding);
     const expectedState =
-      candidate === undefined
+      candidate === undefined ||
+      (schemaVersion === REPORT_SCHEMA_VERSION && value.run.complete === false)
         ? "not_baseline_eligible"
         : knownKeys.has(candidate.key)
           ? "known"
@@ -935,6 +1116,35 @@ const parseReport = (value: unknown): value is PrivacySpecJsonReport => {
             ? "new"
             : undefined;
     if (reportFinding.baselineState !== expectedState) return false;
+  }
+
+  if (schemaVersion === REPORT_SCHEMA_VERSION) {
+    const report = value as unknown as PrivacySpecJsonReportV5;
+    const apiCoverage = report.coverage.apiRequests;
+    const engineCoverage = report.coverage.browserEngines;
+    const hasUnavailableOrUnsupportedEngine =
+      engineCoverage.tests.unavailable > 0 || engineCoverage.tests.unsupported > 0;
+    const engineCapabilityStates = Object.values(engineCoverage.engines).flatMap((engine) =>
+      engine.tests > 0 ? Object.values(engine.capabilities) : [],
+    );
+    const hasLimitedEngineCapability = engineCapabilityStates.some((state) => state !== "complete");
+    const hasIncompleteAPI =
+      apiCoverage.tests.unavailable > 0 ||
+      apiCoverage.tests.partial > 0 ||
+      apiCoverage.tests.unsupported > 0;
+    const hasAPICall = apiCoverage.calls.seen > 0;
+    const hasAPIFlow = parsedFlows.some((flow) => flow.requestSurface === "api-request");
+    if (
+      (report.run.complete === false &&
+        (report.baseline.known.length > 0 || report.baseline.new.length > 0)) ||
+      ((hasUnavailableOrUnsupportedEngine || hasLimitedEngineCapability || hasIncompleteAPI) &&
+        (report.run.complete || report.coverage.observation.status === "complete")) ||
+      hasAPICall !== (apiCoverage.tests.partial > 0 || apiCoverage.tests.unsupported > 0) ||
+      (apiCoverage.calls.observed > 0 && apiCoverage.tests.partial === 0) ||
+      (hasAPIFlow && (apiCoverage.calls.observed === 0 || report.run.complete))
+    ) {
+      return false;
+    }
   }
   for (const diagnostic of value.diagnostics) {
     if (
@@ -951,7 +1161,7 @@ const parseReport = (value: unknown): value is PrivacySpecJsonReport => {
   }
 
   if (
-    schemaVersion === REPORT_SCHEMA_VERSION &&
+    (schemaVersion === REPORT_SCHEMA_VERSION_V4 || schemaVersion === REPORT_SCHEMA_VERSION) &&
     !parseSecondaryAnalysis(value.analysis, value as unknown as PrivacySpecJsonReportV4)
   ) {
     return false;
@@ -1005,6 +1215,13 @@ export const parsePrivacySpecReportV3 = (value: unknown): PrivacySpecJsonReportV
 };
 
 export const parsePrivacySpecReportV4 = (value: unknown): PrivacySpecJsonReportV4 => {
+  if (!parseReport(value) || value.schemaVersion !== REPORT_SCHEMA_VERSION_V4) {
+    throw new ReportFormatError("Invalid or unsupported PrivacySpec JSON report schema.");
+  }
+  return value;
+};
+
+export const parsePrivacySpecReportV5 = (value: unknown): PrivacySpecJsonReportV5 => {
   if (!parseReport(value) || value.schemaVersion !== REPORT_SCHEMA_VERSION) {
     throw new ReportFormatError("Invalid or unsupported PrivacySpec JSON report schema.");
   }
@@ -1021,9 +1238,9 @@ export const parsePrivacySpecReport = (value: unknown): PrivacySpecJsonReport =>
 const isMissingFileError = (error: unknown): boolean => isRecord(error) && error.code === "ENOENT";
 
 export const readPrivacySpecReport = async (path: string): Promise<PrivacySpecJsonReport> => {
-  let metadata: Awaited<ReturnType<typeof stat>>;
+  let metadata: Awaited<ReturnType<typeof lstat>>;
   try {
-    metadata = await stat(path);
+    metadata = await lstat(path);
   } catch (error) {
     if (isMissingFileError(error)) {
       throw new ReportFormatError("No PrivacySpec JSON report is available.");
