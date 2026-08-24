@@ -1,5 +1,9 @@
 import type { ResponseJsonCoverage } from "../discovery/response-json.js";
 import type { PlaywrightObservationCounters } from "../playwright/coverage.js";
+import type {
+  APIRequestCoverage,
+  BrowserEngineCoverage,
+} from "../playwright/experimental-coverage.js";
 
 export type RuntimeCapability =
   | "network"
@@ -11,7 +15,9 @@ export type RuntimeCapability =
   | "page-errors"
   | "custom-contexts"
   | "response-bodies"
-  | "sensitive-sources";
+  | "sensitive-sources"
+  | "browser-engine"
+  | "api-requests";
 
 export type RuntimeCapabilityState =
   | "complete"
@@ -75,6 +81,8 @@ export const createRuntimeCapabilityModel = (input: {
   responseJson: ResponseJsonCoverage;
   observerWorkFailed: boolean;
   responseHeaders?: { enabled: boolean; limitReached: boolean; workFailed: boolean } | undefined;
+  browserEngine?: BrowserEngineCoverage | undefined;
+  apiRequests?: APIRequestCoverage | undefined;
 }): RuntimeCapabilityModel => {
   const unsupported =
     input.observation.contexts.seen > input.observation.contexts.instrumented ||
@@ -97,6 +105,12 @@ export const createRuntimeCapabilityModel = (input: {
         : input.responseHeaders.limitReached && base === "complete"
           ? "partial"
           : base;
+  const browserCapabilityState = aggregateStatus(
+    Object.values(input.browserEngine?.capabilities ?? {}),
+  );
+  const browserEngineState: RuntimeCapabilityState =
+    input.browserEngine?.support === "unsupported" ? "unsupported" : browserCapabilityState;
+  const apiRequestState: RuntimeCapabilityState = input.apiRequests?.status ?? "complete";
   return Object.freeze({
     network: base,
     responses: responseState,
@@ -108,5 +122,7 @@ export const createRuntimeCapabilityModel = (input: {
     "custom-contexts": unsupported ? "unsupported" : "complete",
     "response-bodies": responseState,
     "sensitive-sources": base,
+    "browser-engine": browserEngineState,
+    "api-requests": apiRequestState,
   });
 };

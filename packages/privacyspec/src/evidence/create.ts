@@ -1,4 +1,4 @@
-import type { DataCategory } from "../discovery/source-model.js";
+import { type DataCategory, isDataCategory } from "../discovery/source-model.js";
 import type { PrivacySpecJsonReport } from "../report/model.js";
 import { RULE_DEFINITIONS } from "../rules/definitions.js";
 import type { RegulatoryMapping, TechnicalControlMapping } from "../rules/legal-map.js";
@@ -19,11 +19,6 @@ export interface CreateEvidenceOptions extends EvidenceBuildIdentifiers {
   generatedAt?: string | undefined;
 }
 
-const DATA_CATEGORIES = new Set<DataCategory>([
-  "personal.email",
-  "personal.phone",
-  "secret.password",
-]);
 const RULE_IDS = new Set<RuleId>(Object.keys(RULE_DEFINITIONS) as RuleId[]);
 const EVIDENCE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,127}$/u;
 const MAX_MAPPING_TEXT = 8_192;
@@ -210,7 +205,7 @@ const copyReportLevelMapping = (value: unknown): SafeReportLevelMapping | undefi
 const categoryObservations = (report: PrivacySpecJsonReport): EvidenceCategoryObservation[] => {
   const categories = new Set<DataCategory>();
   for (const category of Object.keys(report.summary.sensitiveSources.byName)) {
-    if (DATA_CATEGORIES.has(category as DataCategory)) categories.add(category as DataCategory);
+    if (isDataCategory(category)) categories.add(category);
   }
   for (const flow of report.flows) categories.add(flow.dataCategory);
   return Array.from(categories)
@@ -314,6 +309,23 @@ const copyResponseCoverage = (
   };
 };
 
+const copyExperimentalCoverage = (report: PrivacySpecJsonReport) =>
+  report.schemaVersion === 5
+    ? {
+        browserEngines: {
+          available: true as const,
+          details: structuredClone(report.coverage.browserEngines),
+        },
+        apiRequests: {
+          available: true as const,
+          details: structuredClone(report.coverage.apiRequests),
+        },
+      }
+    : {
+        browserEngines: { available: false as const },
+        apiRequests: { available: false as const },
+      };
+
 const buildIdentifiers = (options: CreateEvidenceOptions): EvidenceBuildIdentifiers => ({
   ...(options.commit === undefined
     ? {}
@@ -387,6 +399,7 @@ export const createPrivacySpecEvidence = (
     "An absent category, recipient, or finding is not evidence of absence outside the recorded test scope.",
     "External means outside the configured first-party boundary; it does not determine recipient ownership, authorization, or trust.",
     "Test-data hygiene covers supported browser-input email values only.",
+    "Composed request-fixture observation never classifies API arguments or responses as new sensitive sources.",
   ];
   if (!report.run.complete) {
     coverageLimitations.unshift(
@@ -441,6 +454,10 @@ export const createPrivacySpecEvidence = (
       externalRecipients: externalRecipientObservations(report),
       rules,
       dataFlowOccurrences: report.flows.length,
+      requestSurfaces: {
+        browser: report.flows.filter((flow) => flow.requestSurface === "browser").length,
+        apiRequest: report.flows.filter((flow) => flow.requestSurface === "api-request").length,
+      },
       findingOccurrences: {
         technicalFailures: findingCount(report, "technical_failure"),
         reviewRequired: findingCount(report, "review_required"),
@@ -464,6 +481,7 @@ export const createPrivacySpecEvidence = (
       diagnosticCount: report.diagnostics.length,
       integrationErrorCount: report.integrationErrors.length,
       firstPartyJsonResponses: copyResponseCoverage(report),
+      ...copyExperimentalCoverage(report),
     },
     technicalRelevance,
     regulatoryRelevance: {

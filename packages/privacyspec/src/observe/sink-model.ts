@@ -1,5 +1,6 @@
 export type NetworkBodyKind = "none" | "json" | "form" | "text" | "multipart" | "binary";
 export type StorageType = "local-storage" | "session-storage" | "cookie";
+export type RequestSurface = "browser" | "api-request";
 
 export interface RawSinkMaterial {
   location: string;
@@ -8,6 +9,7 @@ export interface RawSinkMaterial {
 
 export interface RawNetworkSink {
   kind: "network";
+  requestSurface: RequestSurface;
   url: string;
   method: string;
   resourceType: string;
@@ -52,6 +54,7 @@ export interface SanitizedPageLocation {
 export interface NetworkSinkObservation {
   kind: "sink";
   sink: "network";
+  requestSurface: RequestSurface;
   method: string;
   resourceType: string;
   recipient: {

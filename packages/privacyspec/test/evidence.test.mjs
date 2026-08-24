@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,11 @@ import { compareBaseline, createBaselineFlowCandidate } from "../dist/baseline/c
 import { createBaselineFile } from "../dist/baseline/write.js";
 import { createPrivacySpecEvidence, validateEvidenceIdentifier } from "../dist/evidence/create.js";
 import { EVIDENCE_SCHEMA_VERSION } from "../dist/evidence/model.js";
+import {
+  EvidenceFormatError,
+  parsePrivacySpecEvidence,
+  readPrivacySpecEvidenceFile,
+} from "../dist/evidence/read.js";
 import { renderEvidenceMarkdown, renderPrivacySpecEvidence } from "../dist/evidence/render.js";
 import { writeEvidenceOutput } from "../dist/evidence/write.js";
 import { createPrivacySpecReport } from "../dist/report/model.js";
@@ -180,7 +185,10 @@ test("evidence emits deterministic audit-supporting technical observations and m
   });
   assert.equal(evidence.observations.findingOccurrences.technicalFailures, 1);
   assert.equal(evidence.observations.findingOccurrences.reviewRequired, 2);
+  assert.deepEqual(evidence.observations.requestSurfaces, { browser: 4, apiRequest: 0 });
   assert.equal(evidence.coverage.diagnosticCount, 1);
+  assert.equal(evidence.coverage.browserEngines.available, true);
+  assert.equal(evidence.coverage.apiRequests.available, true);
   assert.equal(evidence.observations.testDataHygiene.reviewRequired, 1);
   assert.deepEqual(
     evidence.technicalRelevance.map((item) => item.ruleId),
@@ -207,6 +215,40 @@ test("evidence emits deterministic audit-supporting technical observations and m
   assert.doesNotMatch(
     `${json}${markdown}`,
     /audit[- ]ready|certif(?:ied|ication)|\bcompliant\b|non-compliant/iu,
+  );
+});
+
+test("evidence retains expanded DOM categories as sanitized semantic counts", () => {
+  const categories = [
+    "personal.name",
+    "personal.postal_address",
+    "personal.date_of_birth",
+    "personal.account_identifier",
+    "personal.payment_card",
+    "personal.gender_identity",
+    "personal.job_title",
+  ];
+  const report = createReport();
+  for (const [index, category] of categories.entries()) {
+    report.summary.sensitiveSources.byName[category] = index + 1;
+    report.summary.sensitiveSources.total += index + 1;
+    report.flows.push(
+      flow({
+        dataCategory: category,
+        location: `json.${category.replaceAll(".", "_")}`,
+      }),
+    );
+  }
+
+  const evidence = createPrivacySpecEvidence(report, { generatedAt: EVIDENCE_AT });
+  const expanded = evidence.observations.categories.filter((item) =>
+    categories.includes(item.category),
+  );
+  assert.deepEqual(
+    expanded.map((item) => [item.category, item.sourceObservations, item.flowOccurrences]),
+    categories
+      .map((category, index) => [category, index + 1, 1])
+      .toSorted(([left], [right]) => left.localeCompare(right)),
   );
 });
 
@@ -286,4 +328,62 @@ test("evidence output is atomic, private, and contains no raw source fields", as
   assert.equal(await readFile(path, "utf8"), output);
   assert.doesNotMatch(output, /"(?:raw|value|payload|domain)"\s*:/u);
   assert.doesNotMatch(output, /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/iu);
+});
+
+test("strict evidence reader accepts v1/v2 and rejects malformed object and file artifacts", async (context) => {
+  const current = createPrivacySpecEvidence(createReport(), { generatedAt: EVIDENCE_AT });
+  const legacy = structuredClone(current);
+  legacy.evidenceSchemaVersion = 1;
+  delete legacy.observations.requestSurfaces;
+  delete legacy.coverage.browserEngines;
+  delete legacy.coverage.apiRequests;
+
+  assert.deepEqual(parsePrivacySpecEvidence(structuredClone(current)), current);
+  assert.deepEqual(parsePrivacySpecEvidence(structuredClone(legacy)), legacy);
+  const cyclic = structuredClone(current);
+  cyclic.self = cyclic;
+  const accessor = structuredClone(current);
+  let getterCalls = 0;
+  Object.defineProperty(accessor, "observations", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return {};
+    },
+  });
+  for (const malformed of [
+    { ...structuredClone(current), evidenceSchemaVersion: 3 },
+    { ...structuredClone(current), unknown: true },
+    { ...structuredClone(current), scope: { ...current.scope, unknown: true } },
+    {
+      ...structuredClone(current),
+      observations: {
+        ...structuredClone(current.observations),
+        dataFlowOccurrences: current.observations.dataFlowOccurrences + 1,
+      },
+    },
+    {
+      ...structuredClone(current),
+      observations: {
+        ...structuredClone(current.observations),
+        categories: current.observations.categories.toReversed(),
+      },
+    },
+    cyclic,
+    accessor,
+  ]) {
+    assert.throws(() => parsePrivacySpecEvidence(malformed), EvidenceFormatError);
+  }
+  assert.equal(getterCalls, 0);
+
+  const directory = await mkdtemp(join(tmpdir(), "privacyspec-evidence-read-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "evidence.json");
+  await writeFile(path, JSON.stringify(current), "utf8");
+  assert.deepEqual(await readPrivacySpecEvidenceFile(path), current);
+  const linkPath = join(directory, "evidence-link.json");
+  await symlink(path, linkPath);
+  await assert.rejects(readPrivacySpecEvidenceFile(linkPath), /bounded regular file/u);
+  await writeFile(path, "not-json", "utf8");
+  await assert.rejects(readPrivacySpecEvidenceFile(path), /not valid JSON/u);
 });

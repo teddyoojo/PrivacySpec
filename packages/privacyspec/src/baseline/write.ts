@@ -1,10 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { DataFlowSinkKind, TransformKind } from "../correlate/model.js";
 import { looksSensitive, MAX_NORMALIZED_PATH_LENGTH } from "../correlate/redact.js";
-import type { DataCategory } from "../discovery/source-model.js";
+import {
+  BUILTIN_ONLY_CLASSIFIER_CONFIGURATION,
+  type ClassifierConfiguration,
+  type ClassifierConfigurationState,
+  parseClassifierConfiguration,
+  parseClassifierConfigurationState,
+  UNAVAILABLE_CLASSIFIER_CONFIGURATION,
+} from "../discovery/classifier-configuration.js";
+import { type DataCategory, isDataCategory } from "../discovery/source-model.js";
 import { RULE_DEFINITIONS } from "../rules/definitions.js";
 import type { RuleId } from "../rules/model.js";
 import {
@@ -14,10 +22,14 @@ import {
 } from "./compare.js";
 import {
   BASELINE_SCHEMA_VERSION,
+  BASELINE_SCHEMA_VERSION_V1,
   type BaselineFile,
+  type BaselineFileV2,
   type BaselineFlowCandidate,
   LATEST_RUN_SCHEMA_VERSION,
+  LATEST_RUN_SCHEMA_VERSION_V1,
   type LatestRunFile,
+  type LatestRunFileV2,
 } from "./schema.js";
 
 export const MAX_BASELINE_FILE_BYTES = 16 * 1024 * 1024;
@@ -28,11 +40,6 @@ const MAX_KEY_LENGTH = 16_384;
 const MAX_RECIPIENT_LENGTH = 2_048;
 const MAX_LOCATION_LENGTH = 1_024;
 
-const dataCategories = new Set<DataCategory>([
-  "personal.email",
-  "personal.phone",
-  "secret.password",
-]);
 const sinkKinds = new Set<DataFlowSinkKind>([
   "request-url",
   "request-body",
@@ -70,9 +77,12 @@ export class LatestRunIncompleteError extends Error {
 
 interface FileCreationOptions {
   createdAt?: string | undefined;
+  classifierConfiguration?: ClassifierConfiguration | undefined;
 }
 
-interface LatestRunCreationOptions extends FileCreationOptions {
+interface LatestRunCreationOptions {
+  createdAt?: string | undefined;
+  classifierConfiguration?: ClassifierConfigurationState | undefined;
   complete: boolean;
 }
 
@@ -167,7 +177,7 @@ const parseCandidate = (value: unknown, accepted: boolean): BaselineFlowCandidat
     typeof value.ruleId !== "string" ||
     !ruleIds.has(value.ruleId as RuleId) ||
     typeof value.dataCategory !== "string" ||
-    !dataCategories.has(value.dataCategory as DataCategory) ||
+    !isDataCategory(value.dataCategory) ||
     typeof value.sinkKind !== "string" ||
     !sinkKinds.has(value.sinkKind as DataFlowSinkKind) ||
     typeof value.transform !== "string" ||
@@ -230,11 +240,42 @@ const parseFlowArray = (value: unknown, accepted: boolean): BaselineFlowCandidat
   return flows;
 };
 
+const containsCustomCategory = (flows: readonly BaselineFlowCandidate[]): boolean =>
+  flows.some((flow) => flow.dataCategory.startsWith("custom."));
+
+export const classifierConfigurationForBaseline = (
+  baseline: BaselineFile,
+): ClassifierConfigurationState => {
+  if (baseline.schemaVersion === BASELINE_SCHEMA_VERSION) {
+    return structuredClone(baseline.classifierConfiguration);
+  }
+  return containsCustomCategory(baseline.flows)
+    ? UNAVAILABLE_CLASSIFIER_CONFIGURATION
+    : BUILTIN_ONLY_CLASSIFIER_CONFIGURATION;
+};
+
+export const classifierConfigurationForLatestRun = (
+  latestRun: LatestRunFile,
+): ClassifierConfigurationState => {
+  if (latestRun.schemaVersion === LATEST_RUN_SCHEMA_VERSION) {
+    return structuredClone(latestRun.classifierConfiguration);
+  }
+  return containsCustomCategory(latestRun.flows)
+    ? UNAVAILABLE_CLASSIFIER_CONFIGURATION
+    : BUILTIN_ONLY_CLASSIFIER_CONFIGURATION;
+};
+
 export const parseBaselineFile = (value: unknown): BaselineFile => {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ["schemaVersion", "createdAt", "flows"]) ||
-    value.schemaVersion !== BASELINE_SCHEMA_VERSION ||
+    (value.schemaVersion !== BASELINE_SCHEMA_VERSION_V1 &&
+      value.schemaVersion !== BASELINE_SCHEMA_VERSION) ||
+    !hasExactKeys(
+      value,
+      value.schemaVersion === BASELINE_SCHEMA_VERSION
+        ? ["schemaVersion", "createdAt", "classifierConfiguration", "flows"]
+        : ["schemaVersion", "createdAt", "flows"],
+    ) ||
     !isCanonicalTimestamp(value.createdAt)
   ) {
     throw new BaselineFormatError("Invalid or unsupported PrivacySpec baseline schema.");
@@ -243,9 +284,24 @@ export const parseBaselineFile = (value: unknown): BaselineFile => {
   if (candidates === undefined) {
     throw new BaselineFormatError("Invalid PrivacySpec baseline flow entries.");
   }
+  if (value.schemaVersion === BASELINE_SCHEMA_VERSION_V1) {
+    return {
+      schemaVersion: BASELINE_SCHEMA_VERSION_V1,
+      createdAt: value.createdAt,
+      flows: candidates.map((flow) => ({ ...flow, status: "accepted" })),
+    };
+  }
+  const classifierConfiguration = parseClassifierConfiguration(value.classifierConfiguration);
+  if (
+    classifierConfiguration === undefined ||
+    (classifierConfiguration.mode === "builtin-only" && containsCustomCategory(candidates))
+  ) {
+    throw new BaselineFormatError("Invalid PrivacySpec baseline classifier configuration.");
+  }
   return {
     schemaVersion: BASELINE_SCHEMA_VERSION,
     createdAt: value.createdAt,
+    classifierConfiguration,
     flows: candidates.map((flow) => ({ ...flow, status: "accepted" })),
   };
 };
@@ -253,8 +309,14 @@ export const parseBaselineFile = (value: unknown): BaselineFile => {
 export const parseLatestRunFile = (value: unknown): LatestRunFile => {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ["schemaVersion", "createdAt", "complete", "flows"]) ||
-    value.schemaVersion !== LATEST_RUN_SCHEMA_VERSION ||
+    (value.schemaVersion !== LATEST_RUN_SCHEMA_VERSION_V1 &&
+      value.schemaVersion !== LATEST_RUN_SCHEMA_VERSION) ||
+    !hasExactKeys(
+      value,
+      value.schemaVersion === LATEST_RUN_SCHEMA_VERSION
+        ? ["schemaVersion", "createdAt", "complete", "classifierConfiguration", "flows"]
+        : ["schemaVersion", "createdAt", "complete", "flows"],
+    ) ||
     !isCanonicalTimestamp(value.createdAt) ||
     typeof value.complete !== "boolean"
   ) {
@@ -264,10 +326,27 @@ export const parseLatestRunFile = (value: unknown): LatestRunFile => {
   if (flows === undefined) {
     throw new BaselineFormatError("Invalid PrivacySpec latest-run flow entries.");
   }
+  if (value.schemaVersion === LATEST_RUN_SCHEMA_VERSION_V1) {
+    return {
+      schemaVersion: LATEST_RUN_SCHEMA_VERSION_V1,
+      createdAt: value.createdAt,
+      complete: value.complete,
+      flows,
+    };
+  }
+  const classifierConfiguration = parseClassifierConfigurationState(value.classifierConfiguration);
+  if (
+    classifierConfiguration === undefined ||
+    (value.complete && classifierConfiguration.mode === "unavailable") ||
+    (classifierConfiguration.mode === "builtin-only" && containsCustomCategory(flows))
+  ) {
+    throw new BaselineFormatError("Invalid PrivacySpec latest-run classifier configuration.");
+  }
   return {
     schemaVersion: LATEST_RUN_SCHEMA_VERSION,
     createdAt: value.createdAt,
     complete: value.complete,
+    classifierConfiguration,
     flows,
   };
 };
@@ -299,36 +378,44 @@ const uniqueSortedCandidates = (
   return Array.from(candidates.values()).sort((left, right) => left.key.localeCompare(right.key));
 };
 
-const createdAt = (options: FileCreationOptions): string =>
+const createdAt = (options: { createdAt?: string | undefined }): string =>
   options.createdAt ?? new Date().toISOString();
 
 export const createBaselineFile = (
   flows: readonly BaselineFlowCandidate[],
   options: FileCreationOptions = {},
-): BaselineFile =>
-  parseBaselineFile({
+): BaselineFileV2 => {
+  const classifierConfiguration =
+    options.classifierConfiguration ?? BUILTIN_ONLY_CLASSIFIER_CONFIGURATION;
+  return parseBaselineFile({
     schemaVersion: BASELINE_SCHEMA_VERSION,
     createdAt: createdAt(options),
+    classifierConfiguration,
     flows: uniqueSortedCandidates(flows).map((flow) => ({ ...flow, status: "accepted" })),
-  });
+  }) as BaselineFileV2;
+};
 
 export const createLatestRunFile = (
   flows: readonly BaselineFlowCandidate[],
   options: LatestRunCreationOptions,
-): LatestRunFile =>
-  parseLatestRunFile({
+): LatestRunFileV2 => {
+  const classifierConfiguration =
+    options.classifierConfiguration ?? BUILTIN_ONLY_CLASSIFIER_CONFIGURATION;
+  return parseLatestRunFile({
     schemaVersion: LATEST_RUN_SCHEMA_VERSION,
     createdAt: createdAt(options),
     complete: options.complete,
+    classifierConfiguration,
     flows: uniqueSortedCandidates(flows),
-  });
+  }) as LatestRunFileV2;
+};
 
 const isMissingFileError = (error: unknown): boolean => isRecord(error) && error.code === "ENOENT";
 
 const readJsonFile = async (path: string): Promise<unknown | undefined> => {
-  let metadata: Awaited<ReturnType<typeof stat>>;
+  let metadata: Awaited<ReturnType<typeof lstat>>;
   try {
-    metadata = await stat(path);
+    metadata = await lstat(path);
   } catch (error) {
     if (isMissingFileError(error)) return undefined;
     throw error;
@@ -366,6 +453,11 @@ export const readCompleteLatestRunFile = async (path: string): Promise<LatestRun
   if (!latestRun.complete) {
     throw new LatestRunIncompleteError(
       "The PrivacySpec latest-run artifact is incomplete and cannot update a baseline.",
+    );
+  }
+  if (classifierConfigurationForLatestRun(latestRun).mode === "unavailable") {
+    throw new LatestRunIncompleteError(
+      "The PrivacySpec latest-run classifier configuration is unavailable and cannot update a baseline.",
     );
   }
   return latestRun;
@@ -428,7 +520,7 @@ export const writeBaselineFile = async (
   path: string,
   flows: readonly BaselineFlowCandidate[],
   options: FileCreationOptions = {},
-): Promise<BaselineFile> => {
+): Promise<BaselineFileV2> => {
   const baseline = createBaselineFile(flows, options);
   await writeJsonAtomically(path, baseline);
   return baseline;
@@ -438,7 +530,7 @@ export const writeLatestRunFile = async (
   path: string,
   flows: readonly BaselineFlowCandidate[],
   options: LatestRunCreationOptions,
-): Promise<LatestRunFile> => {
+): Promise<LatestRunFileV2> => {
   const latestRun = createLatestRunFile(flows, options);
   await writeJsonAtomically(path, latestRun);
   return latestRun;
@@ -447,8 +539,12 @@ export const writeLatestRunFile = async (
 export const invalidateLatestRunFile = (
   path: string,
   options: FileCreationOptions = {},
-): LatestRunFile => {
-  const latestRun = createLatestRunFile([], { ...options, complete: false });
+): LatestRunFileV2 => {
+  const latestRun = createLatestRunFile([], {
+    ...options,
+    classifierConfiguration: UNAVAILABLE_CLASSIFIER_CONFIGURATION,
+    complete: false,
+  });
   try {
     unlinkSync(path);
   } catch (error) {

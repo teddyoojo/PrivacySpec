@@ -30,7 +30,11 @@ import {
   SECURITY_ATTACHMENT_NAME,
 } from "../dist/analyzers/security/artifact.js";
 import { createBaselineFlowCandidate } from "../dist/baseline/compare.js";
-import { writeBaselineFile, writeLatestRunFile } from "../dist/baseline/write.js";
+import {
+  readLatestRunFile,
+  writeBaselineFile,
+  writeLatestRunFile,
+} from "../dist/baseline/write.js";
 import PrivacySpecReporter from "../dist/playwright/reporter.js";
 import {
   createEmptyPrivacySpecResult,
@@ -38,6 +42,7 @@ import {
   PRIVACYSPEC_ATTACHMENT_NAME,
 } from "../dist/playwright/result.js";
 import { readPrivacySpecReport } from "../dist/report/read.js";
+import { readPrivacySpecRunPart } from "../dist/run-scope/artifact.js";
 
 const resultWith = (attachments, status = "passed") => ({ attachments, status });
 const testCase = { title: "ordinary QA test" };
@@ -69,6 +74,7 @@ const reviewFinding = (overrides = {}) => {
     observation: "personal.email was observed leaving the configured first-party boundary.",
     flow: {
       kind: "data-flow",
+      requestSurface: "browser",
       dataCategory: "personal.email",
       sourceKind: "form-input",
       sourceConfidence: "high",
@@ -536,7 +542,10 @@ test("reporter accepts attachment v1/v2 and summarizes validated experimental re
   const current = createEmptyPrivacySpecResult();
   const previous = structuredClone(current);
   previous.schemaVersion = 2;
+  delete previous.classifierConfiguration;
   delete previous.coverage.observation;
+  delete previous.coverage.browserEngine;
+  delete previous.coverage.apiRequests;
   current.coverage.firstPartyJsonResponses.enabled = true;
   current.coverage.firstPartyJsonResponses.responses = {
     seen: 3,
@@ -595,7 +604,7 @@ test("reporter fails closed for malformed network filtering coverage", async () 
   reporter.onTestEnd(testCase, resultWith([attachmentWithResult(current)]));
 
   assert.deepEqual(await reporter.onEnd({ status: "passed" }), { status: "failed" });
-  assert.match(output.join(""), /invalid network observation coverage/u);
+  assert.match(output.join(""), /invalid PrivacySpec attachment \(invalid coverage\)/u);
 });
 
 test("reporter fails closed for malformed observation coverage counters", async () => {
@@ -611,7 +620,7 @@ test("reporter fails closed for malformed observation coverage counters", async 
   reporter.onTestEnd(testCase, resultWith([attachmentWithResult(current)]));
 
   assert.deepEqual(await reporter.onEnd({ status: "passed" }), { status: "failed" });
-  assert.match(output.join(""), /invalid observation coverage counters/u);
+  assert.match(output.join(""), /invalid PrivacySpec attachment \(invalid coverage\)/u);
 });
 
 test("test-data hygiene review remains non-failing and prints only a count and command hint", async () => {
@@ -673,7 +682,10 @@ test("synthetic hygiene stays quiet and malformed hygiene fails as an integratio
   );
   invalidReporter.onTestEnd(testCase, resultWith([attachmentWithResult(malformed)]));
   assert.deepEqual(await invalidReporter.onEnd({ status: "passed" }), { status: "failed" });
-  assert.match(invalidOutput.join(""), /invalid test-data hygiene section/u);
+  assert.match(
+    invalidOutput.join(""),
+    /invalid PrivacySpec attachment \(invalid test-data hygiene\)/u,
+  );
   assert.doesNotMatch(invalidOutput.join(""), /forged@example/u);
 });
 
@@ -789,6 +801,7 @@ test("reporter summarizes sanitized source categories", async () => {
     category: "personal.email",
     confidence: "high",
     evidence: [{ kind: "input-type", value: "email" }],
+    sourceKind: "form-input",
     control: { elementKind: "input", type: "email" },
     page: { origin: "http://localhost:3100", path: "/customers/new" },
     observedBy: "event",
@@ -858,6 +871,7 @@ test("reporter summarizes sanitized semantic flows without rule decisions", asyn
   const result = createEmptyPrivacySpecResult();
   result.observations.push({
     kind: "data-flow",
+    requestSurface: "browser",
     dataCategory: "personal.email",
     sourceKind: "form-input",
     sourceConfidence: "high",
@@ -982,7 +996,7 @@ test("reporter treats a namespaced privacy analyzer failure as inconclusive", as
   assert.match(output.join(""), /PrivacySpec result: INCOMPLETE/u);
 });
 
-test("reporter ignores malformed or unsupported diagnostic observations", async () => {
+test("reporter rejects malformed or unsupported diagnostic observations", async () => {
   const output = [];
   const reporter = new PrivacySpecReporter({ write: (message) => output.push(message) });
   const result = createEmptyPrivacySpecResult();
@@ -1025,8 +1039,11 @@ test("reporter ignores malformed or unsupported diagnostic observations", async 
     ]),
   );
 
-  assert.equal(await reporter.onEnd({ status: "passed" }), undefined);
-  assert.deepEqual(output, ["PrivacySpec observed 1 tests\n"]);
+  assert.deepEqual(await reporter.onEnd({ status: "passed" }), { status: "failed" });
+  assert.deepEqual(output, [
+    "PrivacySpec observed 0 tests\n",
+    "PrivacySpec integration error: ordinary QA test: invalid PrivacySpec attachment (invalid bounded JSON)\n",
+  ]);
 });
 
 test("reporter fails loudly for malformed data flows without crashing onEnd", async () => {
@@ -1034,6 +1051,7 @@ test("reporter fails loudly for malformed data flows without crashing onEnd", as
   const reporter = new PrivacySpecReporter({ write: (message) => output.push(message) });
   const validFlow = {
     kind: "data-flow",
+    requestSurface: "browser",
     dataCategory: "personal.email",
     sourceKind: "form-input",
     sourceConfidence: "high",
@@ -1097,6 +1115,7 @@ test("reporter rejects control-bearing flow and summary fields before terminal o
   const reporter = new PrivacySpecReporter({ write: (message) => output.push(message) });
   const validFlow = {
     kind: "data-flow",
+    requestSurface: "browser",
     dataCategory: "personal.email",
     sourceKind: "form-input",
     sourceConfidence: "high",
@@ -1151,7 +1170,7 @@ test("reporter rejects control-bearing flow and summary fields before terminal o
   assert.deepEqual(await reporter.onEnd({ status: "passed" }), { status: "failed" });
   assert.deepEqual(output, [
     "PrivacySpec observed 0 tests\n",
-    "PrivacySpec integration error: ordinary QA test: invalid PrivacySpec attachment (invalid data-flow observation)\n",
+    "PrivacySpec integration error: ordinary QA test: invalid PrivacySpec attachment (invalid bounded JSON)\n",
   ]);
   assert.equal(output.join("").includes("forged output"), false);
   assert.equal(output.join("").includes("\u001b"), false);
@@ -1186,6 +1205,7 @@ test("reporter prints review findings without failing the Playwright run", async
     observation: "personal.email was observed leaving the configured first-party boundary.",
     flow: {
       kind: "data-flow",
+      requestSurface: "browser",
       dataCategory: "personal.email",
       sourceKind: "form-input",
       sourceConfidence: "high",
@@ -1325,6 +1345,7 @@ test("reporter fails the run for a technical finding", async () => {
     observation: "High-confidence personal.email was observed in browser console output.",
     flow: {
       kind: "data-flow",
+      requestSurface: "browser",
       dataCategory: "personal.email",
       sourceKind: "form-input",
       sourceConfidence: "high",
@@ -1359,6 +1380,41 @@ test("reporter fails the run for a technical finding", async () => {
   ]);
 });
 
+test("reporter keeps browser and API-request findings as separate terminal semantics", async () => {
+  const output = [];
+  const reporter = new PrivacySpecReporter({ write: (message) => output.push(message) });
+  const result = createEmptyPrivacySpecResult();
+  const browserFinding = reviewFinding({
+    ruleId: "PS1002",
+    severity: "error",
+    classification: "technical_failure",
+    title: "Sensitive data over insecure HTTP",
+    observation: "High-confidence personal.email was observed over insecure HTTP.",
+    flow: {
+      requestSurface: "browser",
+      recipient: {
+        origin: "http://analytics.example.test",
+        host: "analytics.example.test",
+        firstParty: false,
+      },
+    },
+  });
+  const apiFinding = structuredClone(browserFinding);
+  apiFinding.flow.requestSurface = "api-request";
+  apiFinding.flow.test.title = "API request fixture submits the same semantic flow";
+  result.observations.push(browserFinding, apiFinding);
+  result.coverage.apiRequests.enabled = true;
+  result.coverage.apiRequests.status = "partial";
+  result.coverage.apiRequests.calls = { seen: 1, observed: 1, failed: 0, serverErrors: 0 };
+
+  reporter.onTestEnd(testCase, resultWith([attachmentWithResult(result)]));
+
+  assert.deepEqual(await reporter.onEnd({ status: "passed" }), { status: "failed" });
+  const findingLines = output.filter((line) => line.startsWith("PrivacySpec finding:"));
+  assert.equal(findingLines.length, 2);
+  assert.equal(findingLines.filter((line) => line.includes("[surface=api-request]")).length, 1);
+});
+
 test("reporter rejects malformed findings before terminal output", async () => {
   const output = [];
   const reporter = new PrivacySpecReporter({ write: (message) => output.push(message) });
@@ -1388,7 +1444,7 @@ test("reporter rejects malformed findings before terminal output", async () => {
   assert.deepEqual(await reporter.onEnd({ status: "passed" }), { status: "failed" });
   assert.deepEqual(output, [
     "PrivacySpec observed 0 tests\n",
-    "PrivacySpec integration error: ordinary QA test: invalid PrivacySpec attachment (invalid finding observation)\n",
+    "PrivacySpec integration error: ordinary QA test: invalid PrivacySpec attachment (invalid bounded JSON)\n",
   ]);
   assert.equal(output.join("").includes("forged output"), false);
 });
@@ -1523,6 +1579,45 @@ test("reporter rejects a malformed baseline and marks its latest run incomplete"
   );
   const latestRun = JSON.parse(await readFile(latestRunPath, "utf8"));
   assert.equal(latestRun.complete, false);
+});
+
+test("classifier mismatch suppresses only privacy comparison and leaves dependency completeness independent", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "privacyspec-classifier-mismatch-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const baselinePath = join(directory, "privacy-baseline.json");
+  const latestRunPath = join(directory, "privacy-latest.json");
+  const dependencyLatestRunPath = join(directory, "dependency-latest.json");
+  await writeBaselineFile(baselinePath, [], {
+    classifierConfiguration: { mode: "custom", id: "acme-classifiers-v1" },
+  });
+  const output = [];
+  const reporter = new PrivacySpecReporter({
+    baselinePath,
+    latestRunPath,
+    reportPath: false,
+    dependencies: {
+      baselinePath: false,
+      latestRunPath: dependencyLatestRunPath,
+      reportPath: false,
+    },
+    write: (message) => output.push(message),
+  });
+  const result = createEmptyPrivacySpecResult();
+  result.classifierConfiguration = { mode: "custom", id: "acme-classifiers-v2" };
+  reporter.onTestEnd(
+    testCase,
+    resultWith([attachmentWithResult(result), dependencyAttachmentWith([])]),
+  );
+
+  assert.equal(await reporter.onEnd({ status: "passed" }), undefined);
+  assert.match(output.join(""), /privacy baseline comparison suppressed/u);
+  const privacyLatest = await readLatestRunFile(latestRunPath);
+  assert.equal(privacyLatest?.complete, true);
+  assert.deepEqual(privacyLatest?.classifierConfiguration, {
+    mode: "custom",
+    id: "acme-classifiers-v2",
+  });
+  assert.equal((await readCompleteDependencyLatestRunFile(dependencyLatestRunPath)).complete, true);
 });
 
 test("reporter can opt into failing on new review findings without baselining failures", async () => {
@@ -1720,4 +1815,132 @@ test("reporter never exposes a technical-failure run to baseline update", async 
   const latestRun = JSON.parse(await readFile(latestRunPath, "utf8"));
   assert.equal(latestRun.complete, false);
   assert.deepEqual(latestRun.flows, []);
+});
+
+test("reporter run-scope mode derives shard identity and emits only a baseline-ineligible part", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "privacyspec-reporter-part-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const finalReportPath = join(directory, "must-not-exist-report.json");
+  const latestRunPath = join(directory, "must-not-exist-latest.json");
+  const output = [];
+  const reporter = new PrivacySpecReporter({
+    reportPath: finalReportPath,
+    latestRunPath,
+    runScope: {
+      runId: "ci-run-42",
+      configurationId: "chromium-config-v1",
+      outputDirectory: directory,
+    },
+    write: (message) => output.push(message),
+  });
+  reporter.onBegin({
+    projects: [{ name: "chromium" }],
+    shard: { current: 2, total: 3 },
+  });
+  reporter.onTestEnd(testCase, {
+    ...resultWith([
+      attachmentWithResult(createEmptyPrivacySpecResult()),
+      emptyAnalyzerAttachment(
+        DEPENDENCY_ATTACHMENT_NAME,
+        DEPENDENCY_ATTACHMENT_CONTENT_TYPE,
+        "dependency",
+      ),
+      emptyAnalyzerAttachment(
+        SECURITY_ATTACHMENT_NAME,
+        SECURITY_ATTACHMENT_CONTENT_TYPE,
+        "security",
+      ),
+      emptyAnalyzerAttachment(
+        RUNTIME_FAILURE_ATTACHMENT_NAME,
+        RUNTIME_FAILURE_ATTACHMENT_CONTENT_TYPE,
+        "runtime-failure",
+      ),
+    ]),
+    duration: 25,
+  });
+
+  assert.equal(
+    await reporter.onEnd({
+      status: "passed",
+      startTime: new Date("2026-08-23T12:00:00.000Z"),
+      duration: 50,
+    }),
+    undefined,
+  );
+  const partPath = join(directory, "ci-run-42", "part-2-of-3.json");
+  const part = await readPrivacySpecRunPart(partPath);
+  assert.deepEqual(part.scope, {
+    runId: "ci-run-42",
+    configurationId: "chromium-config-v1",
+    part: 2,
+    total: 3,
+    failOnNewReviewFindings: false,
+    nis2EvidenceProfile: false,
+  });
+  assert.deepEqual(part.completeness, {
+    privacy: true,
+    dependencies: true,
+    security: true,
+    runtimeErrors: true,
+  });
+  assert.equal(part.report.run.complete, false);
+  assert.equal(part.report.analysis.status, "inconclusive");
+  assert.equal(part.report.baseline.resolved.length, 0);
+  assert.match(output.join(""), /schema v3, 2\/3, baseline-ineligible/u);
+  await assert.rejects(readFile(finalReportPath, "utf8"));
+  await assert.rejects(readFile(latestRunPath, "utf8"));
+});
+
+test("reporter rejects explicit coordinates that disagree with Playwright sharding", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "privacyspec-reporter-mismatch-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const reporter = new PrivacySpecReporter({
+    runScope: {
+      runId: "ci-run-42",
+      configurationId: "chromium-config-v1",
+      part: 1,
+      total: 2,
+      outputDirectory: directory,
+    },
+    write: () => {},
+  });
+  reporter.onBegin({ projects: [{ name: "chromium" }], shard: { current: 2, total: 2 } });
+  assert.deepEqual(
+    await reporter.onEnd({
+      status: "passed",
+      startTime: new Date("2026-08-23T12:00:00.000Z"),
+      duration: 1,
+    }),
+    { status: "failed" },
+  );
+});
+
+test("reporter disables colliding single-writer outputs for an unconfigured shard", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "privacyspec-reporter-unscoped-shard-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const reportPath = join(directory, "report.json");
+  const latestRunPath = join(directory, "latest.json");
+  const output = [];
+  const reporter = new PrivacySpecReporter({
+    baselinePath: false,
+    reportPath,
+    latestRunPath,
+    dependencies: { baselinePath: false, reportPath: false, latestRunPath: false },
+    security: { baselinePath: false, reportPath: false, latestRunPath: false },
+    runtimeFailures: { baselinePath: false, reportPath: false, latestRunPath: false },
+    write: (message) => output.push(message),
+  });
+  reporter.onBegin({ projects: [{ name: "chromium" }], shard: { current: 1, total: 2 } });
+  reporter.onTestEnd(testCase, resultWith([attachmentWithResult(createEmptyPrivacySpecResult())]));
+  assert.deepEqual(
+    await reporter.onEnd({
+      status: "passed",
+      startTime: new Date("2026-08-23T12:00:00.000Z"),
+      duration: 1,
+    }),
+    { status: "failed" },
+  );
+  assert.match(output.join(""), /sharding requires an explicit PrivacySpec runScope/u);
+  await assert.rejects(readFile(reportPath, "utf8"));
+  await assert.rejects(readFile(latestRunPath, "utf8"));
 });

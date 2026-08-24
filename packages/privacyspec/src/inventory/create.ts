@@ -50,6 +50,7 @@ const flowIdentity = (flow: DataFlow): string =>
     flow.sourceProvenance?.origin ?? null,
     flow.sourceProvenance?.endpoint ?? null,
     flow.sourceProvenance?.location ?? null,
+    flow.requestSurface ?? "browser",
     flow.sinkKind,
     flow.recipient?.origin ?? null,
     flow.recipient?.host ?? null,
@@ -66,6 +67,7 @@ const flowIdentity = (flow: DataFlow): string =>
 const aggregateIdentity = (flow: DataFlow): string =>
   JSON.stringify([
     flow.dataCategory,
+    flow.requestSurface ?? "browser",
     boundaryFor(flow),
     flow.sinkKind,
     flow.recipient?.origin ?? null,
@@ -111,6 +113,7 @@ const uniqueChangeReasons = (
 
 const compareEntry = (left: InventoryEntry, right: InventoryEntry): number =>
   left.dataCategory.localeCompare(right.dataCategory) ||
+  (left.requestSurface ?? "browser").localeCompare(right.requestSurface ?? "browser") ||
   left.boundary.localeCompare(right.boundary) ||
   (left.recipient?.origin ?? "").localeCompare(right.recipient?.origin ?? "") ||
   (left.method ?? "").localeCompare(right.method ?? "") ||
@@ -137,6 +140,7 @@ export const createPrivacyInventory = (report: PrivacySpecJsonReport): PrivacyIn
     if (group === undefined) {
       const entry: InventoryEntry = {
         dataCategory: flow.dataCategory,
+        requestSurface: flow.requestSurface ?? "browser",
         boundary: boundaryFor(flow),
         sinkKind: flow.sinkKind,
         sourceKinds: [],
@@ -252,6 +256,22 @@ export const createPrivacyInventory = (report: PrivacySpecJsonReport): PrivacyIn
     },
     entries,
     resolved: report.run.complete ? report.baseline.resolved.map((flow) => ({ ...flow })) : [],
+    experimentalCoverage:
+      report.schemaVersion === 5
+        ? {
+            browserEngines: {
+              available: true,
+              details: structuredClone(report.coverage.browserEngines),
+            },
+            apiRequests: {
+              available: true,
+              details: structuredClone(report.coverage.apiRequests),
+            },
+          }
+        : {
+            browserEngines: { available: false },
+            apiRequests: { available: false },
+          },
     limitations,
   };
 };

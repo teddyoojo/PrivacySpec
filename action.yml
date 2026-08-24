@@ -1,0 +1,64 @@
+name: PrivacySpec CI Summary
+description: Validate, summarize, and upload an existing PrivacySpec report.
+author: teddyoojo
+
+inputs:
+  working-directory:
+    description: Directory containing the locally installed PrivacySpec package.
+    required: false
+    default: .
+  report-path:
+    description: Relative path to the schema-v5 PrivacySpec JSON report.
+    required: false
+    default: privacyspec-report.json
+  artifact-name:
+    description: Name for the uploaded sanitized report artifact.
+    required: false
+    default: privacyspec-report
+  upload-artifact:
+    description: Whether to upload the validated JSON report.
+    required: false
+    default: "true"
+  retention-days:
+    description: Artifact retention period from 1 through 90 days.
+    required: false
+    default: "7"
+
+outputs:
+  summary-written:
+    description: Whether the GitHub Step Summary was written successfully.
+    value: ${{ steps.prepare.outputs.summary-written }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate and render PrivacySpec report
+      id: prepare
+      shell: bash
+      env:
+        PRIVACYSPEC_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        PRIVACYSPEC_REPORT_PATH: ${{ inputs.report-path }}
+        PRIVACYSPEC_ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        PRIVACYSPEC_UPLOAD_ARTIFACT: ${{ inputs.upload-artifact }}
+        PRIVACYSPEC_RETENTION_DAYS: ${{ inputs.retention-days }}
+      run: node "$GITHUB_ACTION_PATH/scripts/github-action-summary.mjs"
+
+    - name: Upload PrivacySpec report
+      if: steps.prepare.outcome == 'success' && inputs.upload-artifact == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.prepare.outputs.staged-report }}
+        if-no-files-found: error
+        retention-days: ${{ inputs.retention-days }}
+
+    - name: Remove staged PrivacySpec report
+      if: always()
+      shell: bash
+      env:
+        PRIVACYSPEC_STAGED_REPORT: ${{ steps.prepare.outputs.staged-report }}
+      run: node "$GITHUB_ACTION_PATH/scripts/github-action-summary.mjs" cleanup
+
+branding:
+  icon: shield
+  color: purple

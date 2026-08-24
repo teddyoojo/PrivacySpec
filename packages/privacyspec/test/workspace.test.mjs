@@ -14,7 +14,7 @@ const manifest = JSON.parse(await readFile(new URL("../package.json", import.met
 
 test("the PrivacySpec package identifies the public beta", () => {
   assert.equal(manifest.name, "@privacyspec/playwright");
-  assert.equal(manifest.version, "0.1.0-beta.2");
+  assert.equal(manifest.version, "0.1.0-beta.3");
   assert.equal(manifest.publishConfig.access, "public");
   assert.equal(manifest.private, undefined);
   assert.equal(manifest.license, "Apache-2.0");
@@ -26,7 +26,7 @@ test("the PrivacySpec package identifies the public beta", () => {
 });
 
 test("the npm package contains only distributable files", async (context) => {
-  assert.deepEqual(manifest.files, ["dist", "README.md", "LICENSE"]);
+  assert.deepEqual(manifest.files, ["bin", "dist", "README.md", "LICENSE"]);
   const packDirectory = await mkdtemp(join(tmpdir(), "privacyspec-npm-pack-"));
   context.after(() => rm(packDirectory, { recursive: true, force: true }));
   await execFileAsync(
@@ -60,11 +60,17 @@ test("the npm package contains only distributable files", async (context) => {
   assert.ok(paths.includes("dist/index.d.ts"));
   assert.ok(paths.includes("dist/playwright/reporter.js"));
   assert.ok(paths.includes("dist/cli/index.js"));
+  assert.ok(paths.includes("bin/privacyspec.js"));
   assert.ok(paths.includes("README.md"));
   assert.ok(paths.includes("LICENSE"));
   assert.ok(
-    paths.every((path) => path.startsWith("dist/") || allowedRootFiles.has(path)),
-    paths.filter((path) => !path.startsWith("dist/") && !allowedRootFiles.has(path)),
+    paths.every(
+      (path) => path.startsWith("bin/") || path.startsWith("dist/") || allowedRootFiles.has(path),
+    ),
+    paths.filter(
+      (path) =>
+        !path.startsWith("bin/") && !path.startsWith("dist/") && !allowedRootFiles.has(path),
+    ),
   );
   assert.equal(
     paths.some((path) => /^(?:src|test|fixtures|\.privacyspec)\//u.test(path)),
@@ -78,7 +84,7 @@ test("the npm package contains only distributable files", async (context) => {
   ]);
   const cliEntry = verboseArchive
     .split("\n")
-    .find((line) => line.endsWith(" package/dist/cli/index.js"));
+    .find((line) => line.endsWith(" package/bin/privacyspec.js"));
   assert.match(cliEntry ?? "", /^-rwxr-xr-x\s/u);
 });
 
@@ -93,11 +99,15 @@ test("the TypeScript entry point is loadable", async () => {
   assert.equal(entryPoint.REPORT_SCHEMA_VERSION_V1, 1);
   assert.equal(entryPoint.REPORT_SCHEMA_VERSION_V2, 2);
   assert.equal(entryPoint.REPORT_SCHEMA_VERSION_V3, 3);
-  assert.equal(entryPoint.REPORT_SCHEMA_VERSION, 4);
+  assert.equal(entryPoint.REPORT_SCHEMA_VERSION_V4, 4);
+  assert.equal(entryPoint.REPORT_SCHEMA_VERSION, 5);
   assert.equal(entryPoint.ATTACHMENT_SCHEMA_VERSION_V2, 2);
-  assert.equal(entryPoint.ATTACHMENT_SCHEMA_VERSION, 3);
-  assert.equal(entryPoint.EVIDENCE_SCHEMA_VERSION, 1);
-  assert.equal(entryPoint.INVENTORY_SCHEMA_VERSION, 1);
+  assert.equal(entryPoint.ATTACHMENT_SCHEMA_VERSION_V3, 3);
+  assert.equal(entryPoint.ATTACHMENT_SCHEMA_VERSION_V4, 4);
+  assert.equal(entryPoint.ATTACHMENT_SCHEMA_VERSION, 5);
+  assert.equal(entryPoint.RUN_PART_SCHEMA_VERSION, 3);
+  assert.equal(entryPoint.EVIDENCE_SCHEMA_VERSION, 2);
+  assert.equal(entryPoint.INVENTORY_SCHEMA_VERSION, 2);
   assert.equal(entryPoint.TEST_DATA_SCHEMA_VERSION, 1);
   assert.equal(typeof entryPoint.createPrivacyInventory, "function");
   assert.equal(typeof entryPoint.createPrivacySpecEvidence, "function");
@@ -108,6 +118,16 @@ test("the TypeScript entry point is loadable", async () => {
   assert.equal(typeof entryPoint.parsePrivacySpecReportV2, "function");
   assert.equal(typeof entryPoint.parsePrivacySpecReportV3, "function");
   assert.equal(typeof entryPoint.parsePrivacySpecReportV4, "function");
+  assert.equal(typeof entryPoint.parsePrivacySpecReportV5, "function");
+  assert.equal(typeof entryPoint.isDataCategory, "function");
+  assert.equal(typeof entryPoint.getDataCategoryFamily, "function");
   assert.equal(typeof entryPoint.parsePrivacySpecReport, "function");
+  assert.equal(typeof entryPoint.parsePrivacySpecResult, "function");
+  assert.equal(typeof entryPoint.parsePrivacyInventory, "function");
+  assert.equal(typeof entryPoint.readPrivacyInventoryFile, "function");
+  assert.equal(typeof entryPoint.parsePrivacySpecEvidence, "function");
+  assert.equal(typeof entryPoint.readPrivacySpecEvidenceFile, "function");
+  assert.equal(typeof entryPoint.parseClassifierConfiguration, "function");
   assert.equal(typeof entryPoint.renderSecondaryCoverageSummary, "function");
+  assert.equal(typeof entryPoint.renderSecondaryCoverageMarkdown, "function");
 });

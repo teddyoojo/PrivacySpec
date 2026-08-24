@@ -1,6 +1,11 @@
 import type { BrowserContext } from "@playwright/test";
 import { classifySensitiveControl } from "../discovery/classify-control.js";
 import {
+  type CustomControlClassificationResult,
+  classifyCustomSensitiveControl,
+  type NormalizedCustomDomSourceClassifier,
+} from "../discovery/custom-classifiers.js";
+import {
   MAX_SENSITIVE_SOURCES_PER_TEST,
   type SensitiveSourceStreamEvent,
 } from "../discovery/sensitive-registry.js";
@@ -18,7 +23,11 @@ interface BrowserObserverState {
   version: 1;
   sampleCurrentControls: () => void;
   flushPending: () => Promise<void>;
-  snapshot: () => { sources: RawControlSensitiveSource[]; limitReached: boolean };
+  snapshot: () => {
+    sources: RawControlSensitiveSource[];
+    limitReached: boolean;
+    customClassificationAmbiguous: boolean;
+  };
 }
 
 type BrowserGlobal = typeof globalThis & {
@@ -26,13 +35,19 @@ type BrowserGlobal = typeof globalThis & {
 };
 
 type BrowserClassifier = (control: ControlClassificationInput) => ControlClassification | undefined;
+type BrowserCustomClassifier = (
+  control: ControlClassificationInput,
+  classifiers: readonly NormalizedCustomDomSourceClassifier[],
+) => CustomControlClassificationResult;
 
 const installBrowserObserver = (
-  classify: BrowserClassifier,
+  classifyBuiltIn: BrowserClassifier,
+  classifyCustom: BrowserCustomClassifier,
   observerGlobal: string,
   streamBinding: string,
   streamToken: string,
   maxSources: number,
+  customClassifiers: readonly NormalizedCustomDomSourceClassifier[],
 ): void => {
   const browserGlobal = globalThis as BrowserGlobal;
   if (browserGlobal.__privacyspec?.version === 1) {
@@ -47,6 +62,8 @@ const installBrowserObserver = (
   const pending = new Set<Promise<void>>();
   let limitReached = false;
   let limitEventSent = false;
+  let customClassificationAmbiguous = false;
+  let ambiguityEventSent = false;
 
   const streamEvent = (
     event: SensitiveSourceStreamEvent,
@@ -111,6 +128,23 @@ const installBrowserObserver = (
       };
     }
 
+    if (target instanceof HTMLSelectElement) {
+      const associatedLabel = Array.from(target.labels ?? [], (label) => label.textContent ?? "")
+        .join(" ")
+        .trim();
+      return {
+        raw: target.value,
+        control: {
+          elementKind: "select",
+          name: cleanMetadata(target.name),
+          id: cleanMetadata(target.id),
+          autocomplete: cleanMetadata(target.autocomplete),
+          ariaLabel: cleanMetadata(target.getAttribute("aria-label")),
+          associatedLabel: cleanMetadata(associatedLabel),
+        },
+      };
+    }
+
     if (target instanceof HTMLElement && target.isContentEditable) {
       return {
         raw: target.textContent ?? "",
@@ -130,7 +164,7 @@ const installBrowserObserver = (
     version: 1,
     sampleCurrentControls: () => {
       for (const control of document.querySelectorAll(
-        'input, textarea, [contenteditable="true"], [contenteditable=""]',
+        'input, textarea, select, [contenteditable="true"], [contenteditable=""]',
       )) {
         capture(control, "fallback");
       }
@@ -145,6 +179,7 @@ const installBrowserObserver = (
         control: { ...source.control },
       })),
       limitReached,
+      customClassificationAmbiguous,
     }),
   };
 
@@ -154,11 +189,34 @@ const installBrowserObserver = (
       return;
     }
 
-    const classification = classify({
+    const input = {
       value: observed.raw,
       type: observed.control.type,
       autocomplete: observed.control.autocomplete,
-    });
+      name: observed.control.name,
+      id: observed.control.id,
+      ariaLabel: observed.control.ariaLabel,
+      associatedLabel: observed.control.associatedLabel,
+      placeholder: observed.control.placeholder,
+    };
+    const builtInClassification = classifyBuiltIn(input);
+    const customResult =
+      builtInClassification === undefined
+        ? classifyCustom(input, customClassifiers)
+        : { ambiguous: false };
+    if (customResult.ambiguous) {
+      customClassificationAmbiguous = true;
+      if (!ambiguityEventSent) {
+        ambiguityEventSent = true;
+        streamEvent({
+          version: 1,
+          token: streamToken,
+          kind: "classification-ambiguous",
+        });
+      }
+      return;
+    }
+    const classification = builtInClassification ?? customResult.classification;
     if (classification === undefined) {
       return;
     }
@@ -220,12 +278,16 @@ const installBrowserObserver = (
   });
 };
 
-export const createBrowserObserverScript = (streamToken: string): string =>
-  `(() => { const classify = ${classifySensitiveControl.toString()}; const install = ${installBrowserObserver.toString()}; install(classify, ${JSON.stringify(OBSERVER_GLOBAL)}, ${JSON.stringify(SOURCE_STREAM_BINDING)}, ${JSON.stringify(streamToken)}, ${MAX_SENSITIVE_SOURCES_PER_TEST}); })();`;
+export const createBrowserObserverScript = (
+  streamToken: string,
+  customClassifiers: readonly NormalizedCustomDomSourceClassifier[] = [],
+): string =>
+  `(() => { const classifyBuiltIn = ${classifySensitiveControl.toString()}; const classifyCustom = ${classifyCustomSensitiveControl.toString()}; const install = ${installBrowserObserver.toString()}; install(classifyBuiltIn, classifyCustom, ${JSON.stringify(OBSERVER_GLOBAL)}, ${JSON.stringify(SOURCE_STREAM_BINDING)}, ${JSON.stringify(streamToken)}, ${MAX_SENSITIVE_SOURCES_PER_TEST}, ${JSON.stringify(customClassifiers)}); })();`;
 
 export interface CollectedSensitiveSources {
   sources: RawControlSensitiveSource[];
   limitReached: boolean;
+  customClassificationAmbiguous: boolean;
 }
 
 export const collectSensitiveSources = async (
@@ -233,19 +295,25 @@ export const collectSensitiveSources = async (
 ): Promise<CollectedSensitiveSources> => {
   const collected: RawControlSensitiveSource[] = [];
   let limitReached = false;
+  let customClassificationAmbiguous = false;
 
   for (const page of context.pages()) {
     try {
       const pageResult = await page.evaluate(async () => {
         const state = (globalThis as BrowserGlobal).__privacyspec;
         if (state === undefined) {
-          return { sources: [], limitReached: false };
+          return {
+            sources: [],
+            limitReached: false,
+            customClassificationAmbiguous: false,
+          };
         }
         state.sampleCurrentControls();
         await state.flushPending();
         return state.snapshot();
       });
       limitReached ||= pageResult.limitReached;
+      customClassificationAmbiguous ||= pageResult.customClassificationAmbiguous;
       for (const source of pageResult.sources) {
         if (collected.length >= MAX_SENSITIVE_SOURCES_PER_TEST) {
           limitReached = true;
@@ -258,5 +326,5 @@ export const collectSensitiveSources = async (
     }
   }
 
-  return { sources: collected, limitReached };
+  return { sources: collected, limitReached, customClassificationAmbiguous };
 };

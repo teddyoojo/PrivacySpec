@@ -85,6 +85,7 @@ test("exact values correlate to a sanitized first-party request body flow", () =
       sourceKind: "form-input",
       sourceConfidence: "high",
       sinkKind: "request-body",
+      requestSurface: "browser",
       recipient: {
         origin: "https://app.example.test",
         host: "app.example.test",
@@ -231,6 +232,7 @@ test("ambient cookie propagation collapses asset fan-out before reporting", () =
     sourceConfidence: "high",
     sourceProvenance: responseSource.provenance,
     sinkKind: "request-header",
+    requestSurface: "browser",
     recipient: {
       origin: "https://app.example.test",
       host: "app.example.test",
@@ -385,6 +387,7 @@ test("the current page URL participates in correlation without a network sink", 
     sourceKind: "form-input",
     sourceConfidence: "high",
     sinkKind: "request-url",
+    requestSurface: "browser",
     recipient: {
       origin: "https://app.example.test",
       host: "app.example.test",

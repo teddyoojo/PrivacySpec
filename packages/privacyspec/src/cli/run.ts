@@ -2,9 +2,11 @@ import { writeSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
+  invalidateDependencyLatestRunFile,
   readCompleteDependencyLatestRunFile,
   readDependencyBaselineFile,
   writeDependencyBaselineFile,
+  writeDependencyLatestRunFile,
 } from "../analyzers/dependency/artifact.js";
 import {
   DEFAULT_DEPENDENCY_BASELINE_PATH,
@@ -12,9 +14,11 @@ import {
   type DependencySemanticCandidate,
 } from "../analyzers/dependency/model.js";
 import {
+  invalidateRuntimeFailureLatestRunFile,
   readCompleteRuntimeFailureLatestRunFile,
   readRuntimeFailureBaselineFile,
   writeRuntimeFailureBaselineFile,
+  writeRuntimeFailureLatestRunFile,
 } from "../analyzers/runtime-failure/artifact.js";
 import {
   DEFAULT_RUNTIME_FAILURE_BASELINE_PATH,
@@ -22,9 +26,11 @@ import {
   type RuntimeFailureBaselineEntry,
 } from "../analyzers/runtime-failure/model.js";
 import {
+  invalidateSecurityLatestRunFile,
   readCompleteSecurityLatestRunFile,
   readSecurityBaselineFile,
   writeSecurityBaselineFile,
+  writeSecurityLatestRunFile,
 } from "../analyzers/security/artifact.js";
 import {
   DEFAULT_SECURITY_BASELINE_PATH,
@@ -32,14 +38,30 @@ import {
   type SecurityBaselineEntry,
 } from "../analyzers/security/model.js";
 import {
+  applyBaselineProposal,
+  assertBaselineWorkflowArtifactPath,
+  createBaselineProposal,
+  readBaselineProposalFile,
+  writeBaselineProposalFile,
+} from "../baseline/proposal.js";
+import {
+  type BaselineProposalModule,
+  type BaselineProposalSnapshot,
+  DEFAULT_BASELINE_PROPOSAL_PATH,
+  MAX_BASELINE_PROPOSAL_SELECTIONS,
+} from "../baseline/proposal-model.js";
+import {
   type BaselineFlow,
   DEFAULT_BASELINE_PATH,
   DEFAULT_LATEST_RUN_PATH,
 } from "../baseline/schema.js";
 import {
+  classifierConfigurationForLatestRun,
+  invalidateLatestRunFile,
   readBaselineFile,
   readCompleteLatestRunFile,
   writeBaselineFile,
+  writeLatestRunFile,
 } from "../baseline/write.js";
 import { createPrivacySpecEvidence, validateEvidenceIdentifier } from "../evidence/create.js";
 import type { EvidenceFormat } from "../evidence/model.js";
@@ -49,11 +71,30 @@ import { createPrivacyInventory } from "../inventory/create.js";
 import type { InventoryFormat } from "../inventory/model.js";
 import { renderPrivacyInventory } from "../inventory/render.js";
 import { writeInventoryOutput } from "../inventory/write.js";
-import { DEFAULT_REPORT_PATH } from "../report/model.js";
+import { DEFAULT_REPORT_PATH, REPORT_SCHEMA_VERSION } from "../report/model.js";
 import { readPrivacySpecReport } from "../report/read.js";
+import {
+  assertDistinctSecondaryCoverageSummaryPaths,
+  writeSecondaryCoverageSummary,
+} from "../report/summary-write.js";
+import {
+  renderSecondaryCoverageMarkdown,
+  renderSecondaryCoverageSummary,
+  type SecondaryCoverageSummaryFormat,
+} from "../report/terminal.js";
 import { RULE_DEFINITIONS } from "../rules/definitions.js";
 import { getRuleLegalMapping, type RuleLegalMapping } from "../rules/legal-map.js";
 import type { RuleId } from "../rules/model.js";
+import {
+  aggregatePrivacySpecRunParts,
+  type PrivacySpecAggregationBaselines,
+} from "../run-scope/aggregate.js";
+import {
+  invalidatePrivacySpecAggregateReport,
+  readPrivacySpecRunPart,
+  writePrivacySpecAggregateReport,
+} from "../run-scope/artifact.js";
+import { MAX_RUN_PARTS } from "../run-scope/model.js";
 import { createTestDataReport } from "../testdata/create.js";
 import type { TestDataFormat } from "../testdata/model.js";
 import { renderPrivacySpecTestData } from "../testdata/render.js";
@@ -66,6 +107,10 @@ const USAGE = `Usage:
   privacyspec explain <rule-id>
   privacyspec baseline show [--module privacy|dependencies|security|runtime] [--baseline <path>]
   privacyspec baseline update [--module privacy|dependencies|security|runtime] [--baseline <path>] [--report <path>] [--yes]
+  privacyspec baseline propose [--module privacy|dependencies|security|runtime] [--baseline <path>] [--report <path>] [--proposal <path>]
+  privacyspec baseline accept [--proposal <path>] [--baseline <path>] [--report <path>] [--select <proposal-id> ...] [--yes]
+  privacyspec aggregate --part <path> [--part <path> ...] [--report <path>]
+  privacyspec summary [--report <path>] [--format terminal|markdown] [--output <path>]
   privacyspec inventory [--report <path>] [--format terminal|json|csv|markdown] [--output <path>]
   privacyspec testdata [--report <path>] [--format terminal|json|markdown] [--output <path>]
   privacyspec testdata scan <path...> [--format terminal|json|markdown] [--output <path>]
@@ -83,7 +128,7 @@ export interface CliRuntime {
   confirm?: ((question: string) => Promise<boolean>) | undefined;
 }
 
-type BaselineModule = "privacy" | "dependencies" | "security" | "runtime";
+type BaselineModule = BaselineProposalModule;
 
 interface ShowCommand {
   action: "show";
@@ -99,7 +144,24 @@ interface UpdateCommand {
   yes: boolean;
 }
 
-type BaselineCommand = ShowCommand | UpdateCommand;
+interface ProposeCommand {
+  action: "propose";
+  module: BaselineModule;
+  baselinePath: string;
+  reportPath: string;
+  proposalPath: string;
+}
+
+interface AcceptCommand {
+  action: "accept";
+  baselinePath?: string | undefined;
+  reportPath?: string | undefined;
+  proposalPath: string;
+  selectionIds: string[];
+  yes: boolean;
+}
+
+type BaselineCommand = AcceptCommand | ProposeCommand | ShowCommand | UpdateCommand;
 
 interface ExplainCommand {
   action: "explain";
@@ -111,6 +173,19 @@ interface InventoryCommand {
   reportPath: string;
   format: InventoryFormat;
   outputPath?: string | undefined;
+}
+
+interface SummaryCommand {
+  action: "summary";
+  reportPath: string;
+  format: SecondaryCoverageSummaryFormat;
+  outputPath?: string | undefined;
+}
+
+interface AggregateCommand {
+  action: "aggregate";
+  partPaths: string[];
+  reportPath: string;
 }
 
 interface TestDataCommand {
@@ -137,10 +212,12 @@ interface EvidenceCommand {
 }
 
 type CliCommand =
+  | AggregateCommand
   | BaselineCommand
   | EvidenceCommand
   | ExplainCommand
   | InventoryCommand
+  | SummaryCommand
   | TestDataScanCommand
   | TestDataCommand;
 
@@ -190,22 +267,24 @@ const parseBaselineCommand = (args: readonly string[], cwd: string): BaselineCom
     throw new CliArgumentError(`Expected the ${quoted("baseline")} command.`);
   }
   const action = args[1];
-  if (action !== "show" && action !== "update") {
+  if (action !== "show" && action !== "update" && action !== "propose" && action !== "accept") {
     throw new CliArgumentError(
-      `Expected ${quoted("show")} or ${quoted("update")} after ${quoted("baseline")}.`,
+      `Expected ${quoted("show")}, ${quoted("update")}, ${quoted("propose")}, or ${quoted("accept")} after ${quoted("baseline")}.`,
     );
   }
 
   let baselinePath: string | undefined;
   let reportPath: string | undefined;
+  let proposalPath: string | undefined;
   let module: BaselineModule = "privacy";
   let sawModule = false;
   let yes = false;
   let sawYes = false;
+  const selectionIds: string[] = [];
 
   for (let index = 2; index < args.length; index += 1) {
     const argument = args[index];
-    if (argument === "--module") {
+    if (argument === "--module" && action !== "accept") {
       if (sawModule) throw new CliArgumentError("--module may be specified only once.");
       const value = requireFlagValue(args, index, argument, "module");
       if (
@@ -229,7 +308,7 @@ const parseBaselineCommand = (args: readonly string[], cwd: string): BaselineCom
       index += 1;
       continue;
     }
-    if (argument === "--report" && action === "update") {
+    if (argument === "--report" && action !== "show") {
       if (reportPath !== undefined) {
         throw new CliArgumentError("--report may be specified only once.");
       }
@@ -237,7 +316,25 @@ const parseBaselineCommand = (args: readonly string[], cwd: string): BaselineCom
       index += 1;
       continue;
     }
-    if (argument === "--yes" && action === "update") {
+    if (argument === "--proposal" && (action === "propose" || action === "accept")) {
+      if (proposalPath !== undefined) {
+        throw new CliArgumentError("--proposal may be specified only once.");
+      }
+      proposalPath = requireFlagValue(args, index, argument);
+      index += 1;
+      continue;
+    }
+    if (argument === "--select" && action === "accept") {
+      if (selectionIds.length >= MAX_BASELINE_PROPOSAL_SELECTIONS) {
+        throw new CliArgumentError(
+          `--select may be specified at most ${MAX_BASELINE_PROPOSAL_SELECTIONS} times.`,
+        );
+      }
+      selectionIds.push(requireFlagValue(args, index, argument, "proposal ID"));
+      index += 1;
+      continue;
+    }
+    if (argument === "--yes" && (action === "update" || action === "accept")) {
       if (sawYes) throw new CliArgumentError("--yes may be specified only once.");
       sawYes = true;
       yes = true;
@@ -260,26 +357,153 @@ const parseBaselineCommand = (args: readonly string[], cwd: string): BaselineCom
   if (action === "show") {
     return { action, module, baselinePath: resolvedBaselinePath };
   }
+  if (action === "accept") {
+    const resolvedProposalPath = resolve(cwd, proposalPath ?? DEFAULT_BASELINE_PROPOSAL_PATH);
+    const resolvedAcceptBaselinePath =
+      baselinePath === undefined ? undefined : resolve(cwd, baselinePath);
+    const resolvedAcceptReportPath =
+      reportPath === undefined ? undefined : resolve(cwd, reportPath);
+    if (
+      resolvedProposalPath === resolvedAcceptBaselinePath ||
+      resolvedProposalPath === resolvedAcceptReportPath
+    ) {
+      throw new CliArgumentError(
+        "A baseline proposal must not overwrite or be used as a source artifact.",
+      );
+    }
+    return {
+      action,
+      baselinePath: resolvedAcceptBaselinePath,
+      reportPath: resolvedAcceptReportPath,
+      proposalPath: resolvedProposalPath,
+      selectionIds,
+      yes,
+    };
+  }
+  const resolvedReportPath = resolve(
+    cwd,
+    reportPath ??
+      (module === "dependencies"
+        ? DEFAULT_DEPENDENCY_LATEST_RUN_PATH
+        : module === "security"
+          ? DEFAULT_SECURITY_LATEST_RUN_PATH
+          : module === "runtime"
+            ? DEFAULT_RUNTIME_FAILURE_LATEST_RUN_PATH
+            : DEFAULT_LATEST_RUN_PATH),
+  );
+  if (action === "propose") {
+    const resolvedProposalPath = resolve(cwd, proposalPath ?? DEFAULT_BASELINE_PROPOSAL_PATH);
+    if (
+      resolvedProposalPath === resolvedBaselinePath ||
+      resolvedProposalPath === resolvedReportPath ||
+      resolvedBaselinePath === resolvedReportPath
+    ) {
+      throw new CliArgumentError(
+        "Baseline proposal, baseline, and latest-run paths must be distinct.",
+      );
+    }
+    return {
+      action,
+      module,
+      baselinePath: resolvedBaselinePath,
+      reportPath: resolvedReportPath,
+      proposalPath: resolvedProposalPath,
+    };
+  }
   return {
     action,
     module,
     baselinePath: resolvedBaselinePath,
-    reportPath: resolve(
-      cwd,
-      reportPath ??
-        (module === "dependencies"
-          ? DEFAULT_DEPENDENCY_LATEST_RUN_PATH
-          : module === "security"
-            ? DEFAULT_SECURITY_LATEST_RUN_PATH
-            : module === "runtime"
-              ? DEFAULT_RUNTIME_FAILURE_LATEST_RUN_PATH
-              : DEFAULT_LATEST_RUN_PATH),
-    ),
+    reportPath: resolvedReportPath,
     yes,
   };
 };
 
 const inventoryFormats = new Set<InventoryFormat>(["terminal", "json", "csv", "markdown"]);
+
+const summaryFormats = new Set<SecondaryCoverageSummaryFormat>(["terminal", "markdown"]);
+
+const parseAggregateCommand = (args: readonly string[], cwd: string): AggregateCommand => {
+  const partPaths: string[] = [];
+  let reportPath: string | undefined;
+  for (let index = 1; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--part") {
+      if (partPaths.length >= MAX_RUN_PARTS) {
+        throw new CliArgumentError(`--part may be specified at most ${MAX_RUN_PARTS} times.`);
+      }
+      partPaths.push(resolve(cwd, requireFlagValue(args, index, argument)));
+      index += 1;
+      continue;
+    }
+    if (argument === "--report") {
+      if (reportPath !== undefined) {
+        throw new CliArgumentError("--report may be specified only once.");
+      }
+      reportPath = resolve(cwd, requireFlagValue(args, index, argument));
+      index += 1;
+      continue;
+    }
+    throw new CliArgumentError(`Unexpected argument ${quoted(argument ?? "")} for aggregate.`);
+  }
+  if (partPaths.length === 0) {
+    throw new CliArgumentError("The aggregate command requires at least one --part path.");
+  }
+  const resolvedReportPath = reportPath ?? resolve(cwd, DEFAULT_REPORT_PATH);
+  if (partPaths.includes(resolvedReportPath)) {
+    throw new CliArgumentError("Aggregate output must not overwrite a source run part.");
+  }
+  return { action: "aggregate", partPaths, reportPath: resolvedReportPath };
+};
+
+const parseSummaryCommand = (args: readonly string[], cwd: string): SummaryCommand => {
+  let reportPath: string | undefined;
+  let format: SecondaryCoverageSummaryFormat = "terminal";
+  let sawFormat = false;
+  let outputPath: string | undefined;
+  for (let index = 1; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--report") {
+      if (reportPath !== undefined) {
+        throw new CliArgumentError("--report may be specified only once.");
+      }
+      reportPath = requireFlagValue(args, index, argument);
+      index += 1;
+      continue;
+    }
+    if (argument === "--format") {
+      if (sawFormat) throw new CliArgumentError("--format may be specified only once.");
+      const value = requireFlagValue(args, index, argument, "format");
+      if (!summaryFormats.has(value as SecondaryCoverageSummaryFormat)) {
+        throw new CliArgumentError(`Unsupported summary format ${quoted(value)}.`);
+      }
+      format = value as SecondaryCoverageSummaryFormat;
+      sawFormat = true;
+      index += 1;
+      continue;
+    }
+    if (argument === "--output") {
+      if (outputPath !== undefined) {
+        throw new CliArgumentError("--output may be specified only once.");
+      }
+      outputPath = requireFlagValue(args, index, argument);
+      index += 1;
+      continue;
+    }
+    throw new CliArgumentError(`Unexpected argument ${quoted(argument ?? "")} for summary.`);
+  }
+  const resolvedReportPath = resolve(cwd, reportPath ?? DEFAULT_REPORT_PATH);
+  const resolvedOutputPath = outputPath === undefined ? undefined : resolve(cwd, outputPath);
+  if (resolvedOutputPath === resolvedReportPath) {
+    throw new CliArgumentError("Summary output must not overwrite its source JSON report.");
+  }
+  return {
+    action: "summary",
+    reportPath: resolvedReportPath,
+    format,
+    outputPath: resolvedOutputPath,
+  };
+};
 
 const parseInventoryCommand = (args: readonly string[], cwd: string): InventoryCommand => {
   let reportPath: string | undefined;
@@ -501,6 +725,8 @@ const parseEvidenceCommand = (args: readonly string[], cwd: string): EvidenceCom
 };
 
 const parseCliCommand = (args: readonly string[], cwd: string): CliCommand => {
+  if (args[0] === "aggregate") return parseAggregateCommand(args, cwd);
+  if (args[0] === "summary") return parseSummaryCommand(args, cwd);
   if (args[0] === "inventory") return parseInventoryCommand(args, cwd);
   if (args[0] === "testdata" && args[1] === "scan") return parseTestDataScanCommand(args, cwd);
   if (args[0] === "testdata") return parseTestDataCommand(args, cwd);
@@ -548,6 +774,89 @@ const runtimeFailureSummary = (entry: RuntimeFailureBaselineEntry): string => {
     .filter((value) => value !== null)
     .join(" ");
   return `${entry.severity} ${entry.failureType} :: ${entry.summary}${target.length > 0 ? ` :: ${target}` : ""}`;
+};
+
+const defaultBaselinePath = (cwd: string, module: BaselineModule): string =>
+  resolve(
+    cwd,
+    module === "dependencies"
+      ? DEFAULT_DEPENDENCY_BASELINE_PATH
+      : module === "security"
+        ? DEFAULT_SECURITY_BASELINE_PATH
+        : module === "runtime"
+          ? DEFAULT_RUNTIME_FAILURE_BASELINE_PATH
+          : DEFAULT_BASELINE_PATH,
+  );
+
+const defaultLatestRunPath = (cwd: string, module: BaselineModule): string =>
+  resolve(
+    cwd,
+    module === "dependencies"
+      ? DEFAULT_DEPENDENCY_LATEST_RUN_PATH
+      : module === "security"
+        ? DEFAULT_SECURITY_LATEST_RUN_PATH
+        : module === "runtime"
+          ? DEFAULT_RUNTIME_FAILURE_LATEST_RUN_PATH
+          : DEFAULT_LATEST_RUN_PATH,
+  );
+
+const readProposalSnapshot = async (
+  module: BaselineModule,
+  baselinePath: string,
+  reportPath: string,
+): Promise<BaselineProposalSnapshot> => {
+  await Promise.all([
+    assertBaselineWorkflowArtifactPath(baselinePath, { allowMissing: true }),
+    assertBaselineWorkflowArtifactPath(reportPath, { allowMissing: true }),
+  ]);
+  if (module === "dependencies") {
+    const [baseline, latestRun] = await Promise.all([
+      readDependencyBaselineFile(baselinePath),
+      readCompleteDependencyLatestRunFile(reportPath),
+    ]);
+    return { module, baseline, latestRun };
+  }
+  if (module === "security") {
+    const [baseline, latestRun] = await Promise.all([
+      readSecurityBaselineFile(baselinePath),
+      readCompleteSecurityLatestRunFile(reportPath),
+    ]);
+    return { module, baseline, latestRun };
+  }
+  if (module === "runtime") {
+    const [baseline, latestRun] = await Promise.all([
+      readRuntimeFailureBaselineFile(baselinePath),
+      readCompleteRuntimeFailureLatestRunFile(reportPath),
+    ]);
+    return { module, baseline, latestRun };
+  }
+  const [baseline, latestRun] = await Promise.all([
+    readBaselineFile(baselinePath),
+    readCompleteLatestRunFile(reportPath),
+  ]);
+  return { module, baseline, latestRun };
+};
+
+const baselineModuleLabel = (module: BaselineModule): string =>
+  module === "dependencies"
+    ? "dependency"
+    : module === "security"
+      ? "security posture"
+      : module === "runtime"
+        ? "runtime failure"
+        : "privacy";
+
+const safeBaselineWorkflowErrorMessage = (error: unknown): string => {
+  if (!(error instanceof Error)) return "Baseline workflow operation failed.";
+  if (
+    error.name.endsWith("FormatError") ||
+    error.name.endsWith("IncompleteError") ||
+    error.name.startsWith("BaselineProposal") ||
+    error.name === "CliArgumentError"
+  ) {
+    return safeErrorMessage(error);
+  }
+  return "Baseline workflow artifact operation failed.";
 };
 
 const promptForConfirmation = async (question: string): Promise<boolean> => {
@@ -617,6 +926,99 @@ export const runCli = async (
   }
 
   try {
+    if (command.action === "accept") {
+      const environment = runtime.env ?? process.env;
+      if (isTruthyCi(environment.CI)) {
+        writeError("PrivacySpec baseline acceptance is disabled when CI is enabled.\n");
+        return 1;
+      }
+    }
+
+    if (command.action === "aggregate") {
+      const cwd = runtime.cwd ?? process.cwd();
+      const privacyBaselinePath = resolve(cwd, DEFAULT_BASELINE_PATH);
+      const dependencyBaselinePath = resolve(cwd, DEFAULT_DEPENDENCY_BASELINE_PATH);
+      const securityBaselinePath = resolve(cwd, DEFAULT_SECURITY_BASELINE_PATH);
+      const runtimeBaselinePath = resolve(cwd, DEFAULT_RUNTIME_FAILURE_BASELINE_PATH);
+      const privacyLatestRunPath = resolve(cwd, DEFAULT_LATEST_RUN_PATH);
+      const dependencyLatestRunPath = resolve(cwd, DEFAULT_DEPENDENCY_LATEST_RUN_PATH);
+      const securityLatestRunPath = resolve(cwd, DEFAULT_SECURITY_LATEST_RUN_PATH);
+      const runtimeLatestRunPath = resolve(cwd, DEFAULT_RUNTIME_FAILURE_LATEST_RUN_PATH);
+      if (
+        [
+          privacyBaselinePath,
+          dependencyBaselinePath,
+          securityBaselinePath,
+          runtimeBaselinePath,
+          privacyLatestRunPath,
+          dependencyLatestRunPath,
+          securityLatestRunPath,
+          runtimeLatestRunPath,
+        ].includes(command.reportPath)
+      ) {
+        throw new Error(
+          "Aggregate report output must not overwrite a baseline or latest-run artifact.",
+        );
+      }
+
+      invalidateLatestRunFile(privacyLatestRunPath);
+      invalidateDependencyLatestRunFile(dependencyLatestRunPath);
+      invalidateSecurityLatestRunFile(securityLatestRunPath);
+      invalidateRuntimeFailureLatestRunFile(runtimeLatestRunPath);
+      await invalidatePrivacySpecAggregateReport(command.reportPath);
+
+      const [parts, privacy, dependencies, security, runtimeErrors] = await Promise.all([
+        Promise.all(command.partPaths.map((path) => readPrivacySpecRunPart(path))),
+        readBaselineFile(privacyBaselinePath),
+        readDependencyBaselineFile(dependencyBaselinePath),
+        readSecurityBaselineFile(securityBaselinePath),
+        readRuntimeFailureBaselineFile(runtimeBaselinePath),
+      ]);
+      const baselines: PrivacySpecAggregationBaselines = {
+        ...(privacy === undefined ? {} : { privacy }),
+        ...(dependencies === undefined ? {} : { dependencies }),
+        ...(security === undefined ? {} : { security }),
+        ...(runtimeErrors === undefined ? {} : { runtimeErrors }),
+      };
+      const aggregate = aggregatePrivacySpecRunParts(parts, baselines);
+      const createdAt = aggregate.report.generatedAt;
+      try {
+        await writeLatestRunFile(privacyLatestRunPath, aggregate.latestRuns.privacy.entries, {
+          complete: aggregate.latestRuns.privacy.complete,
+          classifierConfiguration: aggregate.latestRuns.privacy.classifierConfiguration,
+          createdAt,
+        });
+        await writeDependencyLatestRunFile(
+          dependencyLatestRunPath,
+          aggregate.latestRuns.dependencies.entries,
+          { complete: aggregate.latestRuns.dependencies.complete, createdAt },
+        );
+        await writeSecurityLatestRunFile(
+          securityLatestRunPath,
+          aggregate.latestRuns.security.entries,
+          { complete: aggregate.latestRuns.security.complete, createdAt },
+        );
+        await writeRuntimeFailureLatestRunFile(
+          runtimeLatestRunPath,
+          aggregate.latestRuns.runtimeErrors.entries,
+          { complete: aggregate.latestRuns.runtimeErrors.complete, createdAt },
+        );
+        await writePrivacySpecAggregateReport(command.reportPath, aggregate.report);
+      } catch (error) {
+        invalidateLatestRunFile(privacyLatestRunPath);
+        invalidateDependencyLatestRunFile(dependencyLatestRunPath);
+        invalidateSecurityLatestRunFile(securityLatestRunPath);
+        invalidateRuntimeFailureLatestRunFile(runtimeLatestRunPath);
+        await invalidatePrivacySpecAggregateReport(command.reportPath);
+        throw error;
+      }
+      writeOut(
+        `PrivacySpec aggregate: ${aggregate.report.analysis.status.toUpperCase()} (parts=${aggregate.scope.receivedParts}/${aggregate.scope.expectedParts}, missing=${aggregate.scope.missingParts.length}).\n`,
+      );
+      writeOut("PrivacySpec aggregate report written.\n");
+      return 0;
+    }
+
     if (command.action === "explain") {
       const mapping = getRuleLegalMapping(command.ruleId);
       if (mapping === undefined) {
@@ -635,6 +1037,29 @@ export const runCli = async (
       } else {
         await writeInventoryOutput(command.outputPath, output);
         writeOut(`PrivacySpec inventory written to ${quoted(command.outputPath)}.\n`);
+      }
+      return 0;
+    }
+
+    if (command.action === "summary") {
+      if (command.outputPath !== undefined) {
+        await assertDistinctSecondaryCoverageSummaryPaths(command.reportPath, command.outputPath);
+      }
+      const report = await readPrivacySpecReport(command.reportPath);
+      if (report.schemaVersion !== REPORT_SCHEMA_VERSION) {
+        throw new Error(
+          `PrivacySpec summary requires the current unified report schema v${REPORT_SCHEMA_VERSION}; rerun PrivacySpec with the current package.`,
+        );
+      }
+      const output =
+        command.format === "markdown"
+          ? renderSecondaryCoverageMarkdown(report)
+          : renderSecondaryCoverageSummary(report);
+      if (command.outputPath === undefined) {
+        writeOut(output);
+      } else {
+        await writeSecondaryCoverageSummary(command.outputPath, output);
+        writeOut(`PrivacySpec summary written to ${quoted(command.outputPath)}.\n`);
       }
       return 0;
     }
@@ -680,7 +1105,83 @@ export const runCli = async (
       return 0;
     }
 
+    if (command.action === "propose") {
+      const snapshot = await readProposalSnapshot(
+        command.module,
+        command.baselinePath,
+        command.reportPath,
+      );
+      const proposal = createBaselineProposal(snapshot);
+      await writeBaselineProposalFile(command.proposalPath, proposal);
+      writeOut(
+        `PrivacySpec ${baselineModuleLabel(proposal.module)} baseline proposal: known=${proposal.counts.known}, add=${proposal.counts.add}, change=${proposal.counts.change}, remove=${proposal.counts.remove}.\n`,
+      );
+      for (const entry of proposal.entries) {
+        writeOut(`- ${entry.id} :: ${entry.action.toUpperCase()} :: ${entry.identity}\n`);
+      }
+      writeOut("Baseline proposal written; accepted baselines were not changed.\n");
+      return 0;
+    }
+
+    if (command.action === "accept") {
+      const proposal = await readBaselineProposalFile(command.proposalPath);
+      const cwd = runtime.cwd ?? process.cwd();
+      const baselinePath = command.baselinePath ?? defaultBaselinePath(cwd, proposal.module);
+      const reportPath = command.reportPath ?? defaultLatestRunPath(cwd, proposal.module);
+      if (
+        command.proposalPath === baselinePath ||
+        command.proposalPath === reportPath ||
+        baselinePath === reportPath
+      ) {
+        throw new Error("Baseline proposal, baseline, and latest-run paths must be distinct.");
+      }
+      const snapshot = await readProposalSnapshot(proposal.module, baselinePath, reportPath);
+      const application = applyBaselineProposal(proposal, snapshot, command.selectionIds);
+      if (application.selectedIds.length === 0) {
+        writeOut("No baseline proposal entries selected; accepted baseline unchanged.\n");
+        return 0;
+      }
+
+      const interactive =
+        runtime.interactive ?? (process.stdin.isTTY === true && process.stdout.isTTY === true);
+      if (!command.yes) {
+        if (!interactive) {
+          writeError(
+            "PrivacySpec baseline acceptance requires --yes in a non-interactive shell.\n",
+          );
+          return 1;
+        }
+        const confirm = runtime.confirm ?? promptForConfirmation;
+        const accepted = await confirm(
+          `Apply ${application.selectedIds.length} selected ${baselineModuleLabel(application.module)} baseline proposal entr${application.selectedIds.length === 1 ? "y" : "ies"} (add=${application.selectedCounts.add}, change=${application.selectedCounts.change}, remove=${application.selectedCounts.remove})? [y/N] `,
+        );
+        if (!accepted) {
+          writeOut("PrivacySpec baseline acceptance cancelled.\n");
+          return 0;
+        }
+      }
+
+      await assertBaselineWorkflowArtifactPath(baselinePath, { allowMissing: true });
+      if (application.module === "dependencies") {
+        await writeDependencyBaselineFile(baselinePath, application.entries);
+      } else if (application.module === "security") {
+        await writeSecurityBaselineFile(baselinePath, application.entries);
+      } else if (application.module === "runtime") {
+        await writeRuntimeFailureBaselineFile(baselinePath, application.entries);
+      } else {
+        await writeBaselineFile(baselinePath, application.entries, {
+          classifierConfiguration: application.classifierConfiguration,
+        });
+      }
+      writeOut(
+        `PrivacySpec ${baselineModuleLabel(application.module)} baseline accepted ${application.selectedIds.length} selected proposal entr${application.selectedIds.length === 1 ? "y" : "ies"} (add=${application.selectedCounts.add}, change=${application.selectedCounts.change}, remove=${application.selectedCounts.remove}).\n`,
+      );
+      writeOut("Unselected accepted baseline entries were preserved.\n");
+      return 0;
+    }
+
     if (command.action === "show") {
+      await assertBaselineWorkflowArtifactPath(command.baselinePath, { allowMissing: true });
       if (command.module === "runtime") {
         const baseline = await readRuntimeFailureBaselineFile(command.baselinePath);
         if (baseline === undefined) {
@@ -746,6 +1247,11 @@ export const runCli = async (
       writeError("PrivacySpec baseline updates are disabled when CI is enabled.\n");
       return 1;
     }
+
+    await Promise.all([
+      assertBaselineWorkflowArtifactPath(command.baselinePath, { allowMissing: true }),
+      assertBaselineWorkflowArtifactPath(command.reportPath, { allowMissing: true }),
+    ]);
 
     const dependencyLatestRun =
       command.module === "dependencies"
@@ -845,7 +1351,13 @@ export const runCli = async (
     if (privacyLatestRun === undefined) {
       throw new Error("Privacy latest-run artifact has the wrong module.");
     }
-    const baseline = await writeBaselineFile(command.baselinePath, privacyLatestRun.flows);
+    const classifierConfiguration = classifierConfigurationForLatestRun(privacyLatestRun);
+    if (classifierConfiguration.mode === "unavailable") {
+      throw new Error("Privacy latest-run classifier configuration is unavailable.");
+    }
+    const baseline = await writeBaselineFile(command.baselinePath, privacyLatestRun.flows, {
+      classifierConfiguration,
+    });
     writeOut(
       `PrivacySpec baseline updated at ${quoted(command.baselinePath)} with ${baseline.flows.length} accepted review flow${baseline.flows.length === 1 ? "" : "s"}.\n`,
     );
@@ -854,7 +1366,11 @@ export const runCli = async (
     );
     return 0;
   } catch (error) {
-    writeError(`PrivacySpec CLI error: ${safeErrorMessage(error)}\n`);
+    const message =
+      command.action === "propose" || command.action === "accept"
+        ? safeBaselineWorkflowErrorMessage(error)
+        : safeErrorMessage(error);
+    writeError(`PrivacySpec CLI error: ${message}\n`);
     return 1;
   }
 };

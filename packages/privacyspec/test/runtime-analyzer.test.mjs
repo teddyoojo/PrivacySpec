@@ -77,6 +77,32 @@ test("capability requirements distinguish required coverage from optional disabl
     resolveAnalyzerCapabilityCoverage(unsupported, { required: ["custom-contexts"] }).status,
     "unsupported",
   );
+
+  const partialEngine = createRuntimeCapabilityModel({
+    observation: observationCoverage,
+    responseJson: createResponseJsonCoverage(false),
+    observerWorkFailed: false,
+    browserEngine: {
+      engine: "firefox",
+      support: "experimental",
+      experimental: true,
+      capabilities: {
+        "init-scripts": "complete",
+        events: "complete",
+        "teardown-fallback": "complete",
+        network: "partial",
+        console: "complete",
+        storage: "complete",
+        cookies: "complete",
+        "response-headers": "complete",
+        "page-errors": "complete",
+      },
+    },
+  });
+  assert.equal(
+    resolveAnalyzerCapabilityCoverage(partialEngine, { required: ["browser-engine"] }).status,
+    "partial",
+  );
 });
 
 test("analyzer failures are isolated and diagnostics are namespaced without error text", async () => {

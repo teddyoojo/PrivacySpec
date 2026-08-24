@@ -197,8 +197,8 @@ test("security target identities share endpoint canonicalization across dynamic 
     projectName: testMetadata.projectName,
   });
   for (const url of [
-    "https://app.example.test/members/q7_amber_forest/notes/cmt3ab4cd5ef6gh7ij8kl9mn0.data",
-    "https://app.example.test/members/m2_silver_harbor/notes/cmx9zy8wv7ut6sr5qp4on3ml2.data",
+    "https://app.example.test/members/q7_amber_forest_/notes/cmt3ab4cd5ef6gh7ij8kl9mn0.data",
+    "https://app.example.test/members/m2_silver_harbor_/notes/cmx9zy8wv7ut6sr5qp4on3ml2.data",
   ]) {
     host.emit({
       type: "security-response",

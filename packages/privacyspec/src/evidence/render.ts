@@ -74,6 +74,7 @@ export const renderEvidenceMarkdown = (evidence: PrivacySpecEvidence): string =>
     `- Projects: ${evidence.scope.projectCount} (${projectLabel(evidence)})`,
     `- Test attempts: ${evidence.scope.tests.observed}/${evidence.scope.tests.total} observed; ${evidence.scope.tests.passed} passed; ${evidence.scope.tests.failed} failed; ${evidence.scope.tests.timedOut} timed out; ${evidence.scope.tests.skipped} skipped; ${evidence.scope.tests.interrupted} interrupted`,
     `- Data-flow occurrences: ${evidence.observations.dataFlowOccurrences}`,
+    `- Request surfaces: browser=${evidence.observations.requestSurfaces.browser}; api-request=${evidence.observations.requestSurfaces.apiRequest}`,
     `- Finding occurrences: ${evidence.observations.findingOccurrences.technicalFailures} technical failures; ${evidence.observations.findingOccurrences.reviewRequired} review required`,
     `- Baseline review identities: ${evidence.observations.baselineReview.known} known; ${evidence.observations.baselineReview.new} new; ${evidence.observations.baselineReview.resolved === null ? "resolved inconclusive" : `${evidence.observations.baselineReview.resolved} resolved`}`,
     `- Test-data hygiene: ${evidence.observations.testDataHygiene.available ? `${countOrUnavailable(evidence.observations.testDataHygiene.reviewRequired)} review required; ${countOrUnavailable(evidence.observations.testDataHygiene.synthetic)} synthetic; ${countOrUnavailable(evidence.observations.testDataHygiene.unassessed)} unassessed` : "unavailable"}`,
@@ -141,6 +142,29 @@ export const renderEvidenceMarkdown = (evidence: PrivacySpecEvidence): string =>
     );
   } else {
     lines.push("Experimental first-party JSON response coverage: unavailable.", "");
+  }
+  const engineCoverage = evidence.coverage.browserEngines;
+  if (engineCoverage.available) {
+    lines.push(
+      "Experimental browser-engine coverage:",
+      "",
+      `- Tests: supported=${engineCoverage.details.tests.supported}; experimental=${engineCoverage.details.tests.experimental}; unsupported=${engineCoverage.details.tests.unsupported}; unavailable=${engineCoverage.details.tests.unavailable}`,
+      "",
+    );
+  } else {
+    lines.push("Experimental browser-engine coverage: unavailable.", "");
+  }
+  const apiCoverage = evidence.coverage.apiRequests;
+  if (apiCoverage.available) {
+    lines.push(
+      "Experimental API-request coverage:",
+      "",
+      `- Calls: seen=${apiCoverage.details.calls.seen}; observed=${apiCoverage.details.calls.observed}; failed=${apiCoverage.details.calls.failed}; server errors=${apiCoverage.details.calls.serverErrors}`,
+      `- Coverage tests: complete=${apiCoverage.details.tests.complete}; partial=${apiCoverage.details.tests.partial}; unsupported=${apiCoverage.details.tests.unsupported}; unavailable=${apiCoverage.details.tests.unavailable}`,
+      "",
+    );
+  } else {
+    lines.push("Experimental API-request coverage: unavailable.", "");
   }
   lines.push(
     `Diagnostics: ${evidence.coverage.diagnosticCount}`,

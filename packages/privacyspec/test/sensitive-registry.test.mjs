@@ -52,7 +52,11 @@ test("registries accept only their own stream token and erase values on disposal
 
   registryA.dispose();
   registryA.add(source(rawB));
-  assert.deepEqual(registryA.snapshot(), { sources: [], limitReached: false });
+  assert.deepEqual(registryA.snapshot(), {
+    sources: [],
+    limitReached: false,
+    customClassificationAmbiguous: false,
+  });
   assert.equal(registryB.snapshot().sources[0]?.raw === rawB, true);
   registryB.dispose();
 });
@@ -134,5 +138,22 @@ test("registry recomputes classification instead of trusting page evidence", () 
   assert.equal(captured?.category, "personal.email");
   assert.equal(captured?.confidence, "high");
   assert.deepEqual(captured?.evidence, [{ kind: "input-type", value: "email" }]);
+  registry.dispose();
+});
+
+test("registry rejects short semantic values that would make substring correlation ambiguous", () => {
+  const registry = new SensitiveValueRegistry();
+  registry.add({
+    ...source("2"),
+    category: "secret.password",
+    evidence: [{ kind: "input-type", value: "password" }],
+    control: { elementKind: "input", autocomplete: "bday-day" },
+  });
+  registry.add({
+    ...source("99"),
+    control: { elementKind: "input", autocomplete: "bday-day" },
+  });
+
+  assert.deepEqual(registry.snapshot().sources, []);
   registry.dispose();
 });

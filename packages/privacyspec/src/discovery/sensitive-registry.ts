@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { classifySensitiveControl } from "./classify-control.js";
+import {
+  classifyCustomSensitiveControl,
+  type NormalizedCustomDomSourceClassifier,
+} from "./custom-classifiers.js";
 import type {
   RawControlSensitiveSource,
   RawResponseSensitiveSource,
@@ -16,22 +20,25 @@ const MAX_METADATA_LENGTH = 200;
 export interface SensitiveSourceStreamEvent {
   version: 1;
   token: string;
-  kind: "source" | "limit-reached";
+  kind: "source" | "limit-reached" | "classification-ambiguous";
   source?: RawControlSensitiveSource | undefined;
 }
 
 export interface SensitiveRegistrySnapshot {
   sources: RawSensitiveSource[];
   limitReached: boolean;
+  customClassificationAmbiguous: boolean;
 }
 
 export type ParsedSensitiveSourceStreamEvent =
   | { kind: "source"; source: RawControlSensitiveSource }
-  | { kind: "limit-reached" };
+  | { kind: "limit-reached" }
+  | { kind: "classification-ambiguous" };
 
 const elementKinds = new Set<SourceControlMetadata["elementKind"]>([
   "input",
   "textarea",
+  "select",
   "contenteditable",
 ]);
 
@@ -78,7 +85,14 @@ const parseControl = (value: unknown): SourceControlMetadata | undefined => {
   return control;
 };
 
-export const parseRawControlSource = (value: unknown): RawControlSensitiveSource | undefined => {
+type ParsedRawControlSourceResult =
+  | { kind: "source"; source: RawControlSensitiveSource }
+  | { kind: "classification-ambiguous" };
+
+const parseRawControlSourceResult = (
+  value: unknown,
+  customClassifiers: readonly NormalizedCustomDomSourceClassifier[] = [],
+): ParsedRawControlSourceResult | undefined => {
   if (!isRecord(value)) return undefined;
 
   const raw = readBoundedString(value, "raw", MAX_RAW_VALUE_LENGTH, true);
@@ -97,33 +111,57 @@ export const parseRawControlSource = (value: unknown): RawControlSensitiveSource
     return undefined;
   }
 
-  const classification = classifySensitiveControl({
+  const input = {
     value: raw,
     type: control.type,
     autocomplete: control.autocomplete,
-  });
+    name: control.name,
+    id: control.id,
+    ariaLabel: control.ariaLabel,
+    associatedLabel: control.associatedLabel,
+    placeholder: control.placeholder,
+  };
+  const builtInClassification = classifySensitiveControl(input);
+  const customResult =
+    builtInClassification === undefined
+      ? classifyCustomSensitiveControl(input, customClassifiers)
+      : { ambiguous: false };
+  if (customResult.ambiguous) return { kind: "classification-ambiguous" };
+  const classification = builtInClassification ?? customResult.classification;
   if (classification === undefined) return undefined;
 
   return {
-    kind: "control",
-    raw,
-    ...classification,
-    control,
-    pageUrl,
-    timestamp: value.timestamp,
-    observedBy: value.observedBy,
+    kind: "source",
+    source: {
+      kind: "control",
+      raw,
+      ...classification,
+      control,
+      pageUrl,
+      timestamp: value.timestamp,
+      observedBy: value.observedBy,
+    },
   };
+};
+
+export const parseRawControlSource = (
+  value: unknown,
+  customClassifiers: readonly NormalizedCustomDomSourceClassifier[] = [],
+): RawControlSensitiveSource | undefined => {
+  const result = parseRawControlSourceResult(value, customClassifiers);
+  return result?.kind === "source" ? result.source : undefined;
 };
 
 export const parseSensitiveSourceStreamEvent = (
   value: unknown,
   token: string,
+  customClassifiers: readonly NormalizedCustomDomSourceClassifier[] = [],
 ): ParsedSensitiveSourceStreamEvent | undefined => {
   if (!isRecord(value) || value.version !== 1 || value.token !== token) return undefined;
   if (value.kind === "limit-reached") return { kind: "limit-reached" };
+  if (value.kind === "classification-ambiguous") return { kind: "classification-ambiguous" };
   if (value.kind !== "source") return undefined;
-  const source = parseRawControlSource(value.source);
-  return source === undefined ? undefined : { kind: "source", source };
+  return parseRawControlSourceResult(value.source, customClassifiers);
 };
 
 const cloneSource = (source: RawSensitiveSource): RawSensitiveSource =>
@@ -146,7 +184,12 @@ export class SensitiveValueRegistry {
   readonly #identityIndexes = new Map<string, number>();
   #active = true;
   #limitReached = false;
+  #customClassificationAmbiguous = false;
   #streamToken: string = randomUUID();
+
+  constructor(
+    private readonly customClassifiers: readonly NormalizedCustomDomSourceClassifier[] = [],
+  ) {}
 
   get streamToken(): string {
     return this.#streamToken;
@@ -158,21 +201,31 @@ export class SensitiveValueRegistry {
 
   recordStreamEvent(value: unknown): void {
     if (!this.#active) return;
-    const event = parseSensitiveSourceStreamEvent(value, this.#streamToken);
+    const event = parseSensitiveSourceStreamEvent(value, this.#streamToken, this.customClassifiers);
     if (event?.kind === "limit-reached") this.#limitReached = true;
-    else if (event?.kind === "source") this.#addParsed(event.source);
+    else if (event?.kind === "classification-ambiguous") {
+      this.#customClassificationAmbiguous = true;
+    } else if (event?.kind === "source") this.#addParsed(event.source);
   }
 
   markLimitReached(): void {
     if (this.#active) this.#limitReached = true;
   }
 
+  markCustomClassificationAmbiguous(): void {
+    if (this.#active) this.#customClassificationAmbiguous = true;
+  }
+
   add(value: unknown): void {
     if (!this.#active) return;
-    const source = parseRawControlSource(value);
-    if (source === undefined) return;
+    const result = parseRawControlSourceResult(value, this.customClassifiers);
+    if (result?.kind === "classification-ambiguous") {
+      this.#customClassificationAmbiguous = true;
+      return;
+    }
+    if (result?.kind !== "source") return;
 
-    this.#addParsed(source);
+    this.#addParsed(result.source);
   }
 
   addResponse(source: RawResponseSensitiveSource): SensitiveSourceAddResult {
@@ -218,6 +271,7 @@ export class SensitiveValueRegistry {
     return {
       sources: this.#sources.map(cloneSource),
       limitReached: this.#limitReached,
+      customClassificationAmbiguous: this.#customClassificationAmbiguous,
     };
   }
 
@@ -226,6 +280,7 @@ export class SensitiveValueRegistry {
     this.#sources.length = 0;
     this.#identityIndexes.clear();
     this.#limitReached = false;
+    this.#customClassificationAmbiguous = false;
     this.#streamToken = "";
   }
 }

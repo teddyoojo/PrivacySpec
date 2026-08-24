@@ -110,6 +110,17 @@ test("valid non-reserved domains require review without routability or person cl
 });
 
 test("malformed email values and unsupported sources/categories remain unassessed", () => {
+  const expandedCategories = [
+    "personal.name",
+    "personal.postal_address",
+    "personal.date_of_birth",
+    "personal.account_identifier",
+    "personal.payment_card",
+    "personal.gender_identity",
+    "personal.job_title",
+    "custom.personal.acme.benefit_code",
+    "custom.secret.acme.employee_pin",
+  ];
   const responseSource = {
     kind: "response-json",
     raw: "response@example.test",
@@ -133,24 +144,38 @@ test("malformed email values and unsupported sources/categories remain unassesse
         category: "personal.phone",
         control: { elementKind: "input", type: "tel" },
       }),
+      ...expandedCategories.map((category, index) =>
+        controlSource(`synthetic-${category.replaceAll(".", "-")}`, {
+          category,
+          control: {
+            elementKind: index === 5 ? "select" : "input",
+            autocomplete: "semantic-fixture",
+          },
+        }),
+      ),
       responseSource,
     ],
     [],
     testAttribution,
   );
-  assert.equal(observations.length, 3);
+  assert.equal(observations.length, 12);
   assert.equal(
     observations.every((item) => item.verdict === "UNASSESSED"),
     true,
   );
   assert.equal(observations.filter((item) => item.signal === "EMAIL_SHAPE_UNSUPPORTED").length, 1);
-  assert.equal(
-    observations.some((item) => item.signal === "UNSUPPORTED_CATEGORY"),
-    true,
-  );
+  assert.equal(observations.filter((item) => item.signal === "UNSUPPORTED_CATEGORY").length, 10);
   assert.equal(
     observations.some((item) => item.signal === "UNSUPPORTED_SOURCE_KIND"),
     true,
+  );
+  const parsed = parseTestDataSection(createTestDataSection(observations));
+  assert.deepEqual(
+    parsed?.observations
+      .filter((item) => expandedCategories.includes(item.category))
+      .map((item) => item.category)
+      .toSorted(),
+    expandedCategories.toSorted(),
   );
 });
 
@@ -216,7 +241,7 @@ test("terminal, JSON, and Markdown output are deterministic and private", async 
   );
   const report = {
     ...section,
-    tool: { name: "privacyspec", version: "0.1.0-beta.2" },
+    tool: { name: "privacyspec", version: "0.1.0-beta.3" },
     sourceReport: {
       schemaVersion: 2,
       generatedAt: "2026-08-20T12:00:00.000Z",

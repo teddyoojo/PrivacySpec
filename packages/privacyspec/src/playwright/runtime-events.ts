@@ -5,6 +5,7 @@ import type {
   PrivacyRuntimeAnalyzer,
 } from "../analyzers/privacy/analyzer.js";
 import { PRIVACY_ANALYZER_ID } from "../analyzers/privacy/analyzer.js";
+import type { NormalizedCustomDomSourceClassifier } from "../discovery/custom-classifiers.js";
 import {
   parseSensitiveSourceStreamEvent,
   type SensitiveSourceAddResult,
@@ -23,6 +24,7 @@ import type { RawConsoleSink, RawNetworkSink, RawStorageSink } from "../observe/
 import { parseStorageStreamEvent } from "../observe/sink-registry.js";
 import type { AnalyzerHost } from "../runtime/analyzer.js";
 import { type RuntimeEventMeta, RuntimeEventMetadataFactory } from "../runtime/events.js";
+import type { APIRequestEventConsumer } from "./api-request-observer.js";
 import type { ResponseSourceConsumer } from "./response-observer.js";
 
 const requestPage = (request: Request): Page | undefined => {
@@ -78,7 +80,8 @@ export class PlaywrightRuntimeEventAdapter
     NetworkSinkConsumer,
     ConsoleSinkConsumer,
     ResponseSourceConsumer,
-    SecurityResponseConsumer
+    SecurityResponseConsumer,
+    APIRequestEventConsumer
 {
   readonly sourceStreamToken = randomUUID();
   readonly storageStreamToken = randomUUID();
@@ -91,6 +94,7 @@ export class PlaywrightRuntimeEventAdapter
     private readonly privacyAnalyzer: PrivacyRuntimeAnalyzer,
     private readonly defaultContext: BrowserContext,
     test: { testId: string; projectName: string },
+    private readonly customClassifiers: readonly NormalizedCustomDomSourceClassifier[] = [],
   ) {
     this.#metadata = new RuntimeEventMetadataFactory(test);
   }
@@ -104,6 +108,10 @@ export class PlaywrightRuntimeEventAdapter
       this.defaultContext,
       request === undefined ? undefined : requestPage(request),
     );
+  }
+
+  reserveAPIRequest(): number {
+    return this.#reserve(this.defaultContext);
   }
 
   reserveConsole(message?: ConsoleMessage): number {
@@ -159,6 +167,7 @@ export class PlaywrightRuntimeEventAdapter
         method: sink.method,
         resourceType: sink.resourceType,
         frameKind: "unknown",
+        requestSurface: sink.requestSurface,
         timestamp: sink.timestamp,
       },
       sink,
@@ -170,6 +179,50 @@ export class PlaywrightRuntimeEventAdapter
     const page = request === undefined ? undefined : requestPage(request);
     const meta = this.#take(metadata.timestamp, this.defaultContext, page);
     this.host.emit({ type: "request", meta, request: metadata });
+  }
+
+  addAPIRequest(sink: RawNetworkSink, metadata: NetworkRequestMetadata): void {
+    if (!this.#active) return;
+    const meta = this.#take(sink.timestamp, this.defaultContext);
+    this.host.emit({ type: "request", meta, request: metadata, sink });
+  }
+
+  addAPIRequestMetadata(metadata: NetworkRequestMetadata): void {
+    if (!this.#active) return;
+    const meta = this.#take(metadata.timestamp, this.defaultContext);
+    this.host.emit({ type: "request", meta, request: metadata });
+  }
+
+  recordAPIResponse(response: RuntimeSecurityResponse): void {
+    if (!this.#active) return;
+    this.host.emit({
+      type: "security-response",
+      meta: this.#metadata.create({ context: this.defaultContext }),
+      response,
+    });
+  }
+
+  recordAPIRequestFailure(metadata: NetworkRequestMetadata): void {
+    if (!this.#active) return;
+    this.host.emit({
+      type: "request-failed",
+      meta: this.#metadata.create({ context: this.defaultContext }),
+      request: metadata,
+      failureCode: "REQUEST_FAILED",
+    });
+  }
+
+  recordAPIHttpResponse(input: { url: string; method: string; status: number }): void {
+    if (!this.#active) return;
+    this.host.emit({
+      type: "http-response",
+      meta: this.#metadata.create({ context: this.defaultContext }),
+      url: input.url,
+      method: input.method,
+      resourceType: "fetch",
+      frameKind: "unknown",
+      status: input.status,
+    });
   }
 
   addConsole(sink: RawConsoleSink, message?: ConsoleMessage): void {
@@ -199,6 +252,7 @@ export class PlaywrightRuntimeEventAdapter
         method: request.method(),
         resourceType: request.resourceType(),
         frameKind: requestFrameKind(request),
+        requestSurface: "browser",
         timestamp,
       },
       failureCode: normalizedRequestFailureCode(request),
@@ -259,10 +313,19 @@ export class PlaywrightRuntimeEventAdapter
 
   recordSensitiveSourceStreamEvent(source: RuntimeBindingSource, value: unknown): void {
     if (!this.#active) return;
-    const parsed = parseSensitiveSourceStreamEvent(value, this.sourceStreamToken);
+    const parsed = parseSensitiveSourceStreamEvent(
+      value,
+      this.sourceStreamToken,
+      this.customClassifiers,
+    );
     if (parsed?.kind === "limit-reached") {
       this.host.emit({
         type: "sensitive-source-limit",
+        meta: this.#metadata.create({ context: source.context, page: source.page }),
+      });
+    } else if (parsed?.kind === "classification-ambiguous") {
+      this.host.emit({
+        type: "sensitive-source-ambiguous",
         meta: this.#metadata.create({ context: source.context, page: source.page }),
       });
     } else if (parsed?.kind === "source") {
@@ -287,6 +350,14 @@ export class PlaywrightRuntimeEventAdapter
     if (!this.#active) return;
     this.host.emit({
       type: "sensitive-source-limit",
+      meta: this.#metadata.create({ context: this.defaultContext }),
+    });
+  }
+
+  markCustomSourceClassificationAmbiguous(): void {
+    if (!this.#active) return;
+    this.host.emit({
+      type: "sensitive-source-ambiguous",
       meta: this.#metadata.create({ context: this.defaultContext }),
     });
   }

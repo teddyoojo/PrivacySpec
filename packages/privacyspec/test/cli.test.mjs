@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -23,8 +23,10 @@ import {
   writeSecurityLatestRunFile,
 } from "../dist/analyzers/security/artifact.js";
 import { createBaselineKey } from "../dist/baseline/compare.js";
+import { readBaselineProposalFile } from "../dist/baseline/proposal.js";
+import { DEFAULT_BASELINE_PROPOSAL_PATH } from "../dist/baseline/proposal-model.js";
 import { DEFAULT_BASELINE_PATH, DEFAULT_LATEST_RUN_PATH } from "../dist/baseline/schema.js";
-import { readBaselineFile, writeLatestRunFile } from "../dist/baseline/write.js";
+import { readBaselineFile, writeBaselineFile, writeLatestRunFile } from "../dist/baseline/write.js";
 import { runCli } from "../dist/cli/run.js";
 import { writePrivacySpecReport } from "../dist/report/json.js";
 import { createPrivacySpecReport, DEFAULT_REPORT_PATH } from "../dist/report/model.js";
@@ -32,6 +34,7 @@ import { createPrivacySpecReport, DEFAULT_REPORT_PATH } from "../dist/report/mod
 const execFileAsync = promisify(execFile);
 const packageDirectory = fileURLToPath(new URL("..", import.meta.url));
 const cliEntry = fileURLToPath(new URL("../dist/cli/index.js", import.meta.url));
+const cliLauncher = fileURLToPath(new URL("../bin/privacyspec.js", import.meta.url));
 
 const identity = {
   ruleId: "PS1004",
@@ -43,6 +46,10 @@ const identity = {
   transform: "EXACT",
 };
 const candidate = { key: createBaselineKey(identity), ...identity };
+const privacyCandidateAt = (location) => {
+  const value = { ...identity, location };
+  return { key: createBaselineKey(value), ...value };
+};
 const dependencyCandidate = {
   key: createDependencySemanticKey("script", "cdn.vendor.test"),
   boundary: "external",
@@ -106,7 +113,7 @@ const temporaryDirectory = async (context) => {
   return directory;
 };
 
-const emptyReport = ({ complete = true, testDataObservations = [] } = {}) =>
+const emptyReport = ({ complete = true, testDataObservations = [], secondaryAnalysis } = {}) =>
   createPrivacySpecReport({
     generatedAt: "2026-08-20T12:00:00.000Z",
     startedAt: "2026-08-20T11:59:59.000Z",
@@ -136,7 +143,87 @@ const emptyReport = ({ complete = true, testDataObservations = [] } = {}) =>
     ruleMappings: [],
     profileMappings: [],
     testDataObservations,
+    secondaryAnalysis,
   });
+
+const completeSecondaryAnalysis = ({ dependencyFindings = [], runtimeFindings = [] } = {}) => ({
+  dependencies: {
+    schemaVersion: 1,
+    generatedAt: "2026-08-20T12:00:00.000Z",
+    complete: true,
+    coverage: "complete",
+    inventory: [],
+    findings: dependencyFindings,
+    baseline: { exists: true, known: 0, new: dependencyFindings.length, resolved: 0 },
+    diagnostics: [],
+  },
+  security: {
+    schemaVersion: 1,
+    generatedAt: "2026-08-20T12:00:00.000Z",
+    complete: true,
+    coverage: "complete",
+    inventory: [],
+    findings: [],
+    baseline: { exists: true, known: 0, changed: 0, newTargets: 0, resolved: 0 },
+    diagnostics: [],
+  },
+  runtimeErrors: {
+    schemaVersion: 1,
+    generatedAt: "2026-08-20T12:00:00.000Z",
+    complete: true,
+    coverage: "complete",
+    inventory: [],
+    findings: runtimeFindings,
+    baseline: { exists: true, known: 0, new: runtimeFindings.length, resolved: 0 },
+    diagnostics: [],
+  },
+});
+
+const summaryReport = (status) => {
+  if (status === "inconclusive") return emptyReport();
+  const dependencyFindings =
+    status === "review"
+      ? [
+          {
+            kind: "dependency-finding",
+            ruleId: "NEW_EXTERNAL_SCRIPT",
+            classification: "REVIEW_REQUIRED",
+            identity: createDependencySemanticKey("script", "cdn.new-vendor.test"),
+            host: "cdn.new-vendor.test",
+            origin: "https://cdn.new-vendor.test",
+            observedAs: "script",
+            firstSeenTest: { file: "tests/dependency.spec.ts", project: "chromium" },
+          },
+        ]
+      : [];
+  const runtimeFindings =
+    status === "fail"
+      ? [
+          {
+            kind: "runtime-failure-finding",
+            ruleId: "RUNTIME_HTTP_5XX",
+            classification: "TECHNICAL_FAILURE",
+            identity: runtimeFailureCandidate.key,
+            failureType: runtimeFailureCandidate.failureType,
+            severity: runtimeFailureCandidate.severity,
+            summary: runtimeFailureCandidate.summary,
+            boundary: runtimeFailureCandidate.boundary,
+            host: runtimeFailureCandidate.host,
+            method: runtimeFailureCandidate.method,
+            endpoint: runtimeFailureCandidate.endpoint,
+            httpStatus: runtimeFailureCandidate.httpStatus,
+            errorName: runtimeFailureCandidate.errorName,
+            signature: runtimeFailureCandidate.signature,
+            failureCode: runtimeFailureCandidate.failureCode,
+            firstSeenTest: { file: "tests/runtime.spec.ts", project: "chromium" },
+            occurrenceCount: 1,
+          },
+        ]
+      : [];
+  return emptyReport({
+    secondaryAnalysis: completeSecondaryAnalysis({ dependencyFindings, runtimeFindings }),
+  });
+};
 
 const invoke = async (args, { cwd, env = {}, interactive = false, confirm } = {}) => {
   const stdout = [];
@@ -166,13 +253,16 @@ const invoke = async (args, { cwd, env = {}, interactive = false, confirm } = {}
 
 test("package exposes a working privacyspec binary", async () => {
   const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-  assert.deepEqual(manifest.bin, { privacyspec: "./dist/cli/index.js" });
+  assert.deepEqual(manifest.bin, { privacyspec: "./bin/privacyspec.js" });
 
-  const { stdout, stderr } = await execFileAsync(process.execPath, [cliEntry, "--help"], {
+  const { stdout, stderr } = await execFileAsync(process.execPath, [cliLauncher, "--help"], {
     cwd: packageDirectory,
   });
   assert.match(stdout, /privacyspec explain <rule-id>/u);
   assert.match(stdout, /privacyspec baseline show/u);
+  assert.match(stdout, /privacyspec baseline propose/u);
+  assert.match(stdout, /privacyspec baseline accept/u);
+  assert.match(stdout, /privacyspec summary/u);
   assert.match(stdout, /privacyspec inventory/u);
   assert.match(stdout, /privacyspec testdata/u);
   assert.match(stdout, /privacyspec testdata scan <path\.\.\.>/u);
@@ -184,6 +274,109 @@ test("package exposes a working privacyspec binary", async () => {
   });
   assert.match(explanation.stdout, /PrivacySpec PS1001: Personal data or secret in URL/u);
   assert.equal(explanation.stderr, "");
+});
+
+test("summary supports defaults, Markdown stdout, and private atomic output", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  await writePrivacySpecReport(join(cwd, DEFAULT_REPORT_PATH), summaryReport("pass"));
+
+  const terminal = await invoke(["summary"], { cwd });
+  assert.equal(terminal.exitCode, 0);
+  assert.equal(terminal.stderr, "");
+  assert.match(terminal.stdout, /^PrivacySpec Secondary Coverage\n/u);
+
+  const markdown = await invoke(["summary", "--format", "markdown"], { cwd });
+  assert.equal(markdown.exitCode, 0);
+  assert.equal(markdown.stderr, "");
+  assert.match(markdown.stdout, /^# PrivacySpec Secondary Coverage\n/u);
+
+  const outputPath = join(cwd, "nested", "summary.md");
+  const written = await invoke(
+    ["summary", "--format", "markdown", "--output", "nested/summary.md"],
+    { cwd },
+  );
+  assert.equal(written.exitCode, 0);
+  assert.match(written.stdout, /summary written/u);
+  assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
+  assert.match(await readFile(outputPath, "utf8"), /^# PrivacySpec Secondary Coverage\n/u);
+
+  const collision = await invoke(
+    ["summary", "--report", DEFAULT_REPORT_PATH, "--output", DEFAULT_REPORT_PATH],
+    { cwd },
+  );
+  assert.equal(collision.exitCode, 1);
+  assert.match(collision.stderr, /must not overwrite its source JSON report/u);
+
+  await symlink(".", join(cwd, "report-alias"));
+  const aliasCollision = await invoke(
+    ["summary", "--output", "report-alias/privacyspec-report.json"],
+    { cwd },
+  );
+  assert.equal(aliasCollision.exitCode, 1);
+  assert.match(aliasCollision.stderr, /must not overwrite its source JSON report/u);
+
+  const unwritable = await invoke(["summary", "--output", "nested"], { cwd });
+  assert.equal(unwritable.exitCode, 1);
+  assert.match(unwritable.stderr, /PrivacySpec CLI error:/u);
+});
+
+test("summary accepts every valid semantic status without imposing reporter policy", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  for (const status of ["pass", "review", "fail", "inconclusive"]) {
+    await writePrivacySpecReport(join(cwd, DEFAULT_REPORT_PATH), summaryReport(status));
+    const result = await invoke(["summary", "--format", "markdown"], { cwd });
+    assert.equal(result.exitCode, 0, status);
+    assert.equal(result.stderr, "", status);
+    assert.match(
+      result.stdout,
+      new RegExp(`\\| Secondary coverage \\| ${status.toUpperCase()} \\|`, "u"),
+    );
+  }
+});
+
+test("summary rejects legacy, malformed, missing, and unsupported reports", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const current = summaryReport("pass");
+  const schemaV4 = structuredClone(current);
+  schemaV4.schemaVersion = 4;
+  delete schemaV4.coverage.browserEngines;
+  delete schemaV4.coverage.apiRequests;
+  const { analysis: _analysis, ...schemaV3 } = structuredClone(schemaV4);
+  const { observation: _observation, ...schemaV2Coverage } = schemaV3.coverage;
+  const schemaV2 = { ...schemaV3, schemaVersion: 2, coverage: schemaV2Coverage };
+  const { coverage: _coverage, testData: _testData, ...schemaV1Common } = schemaV2;
+  const legacyReports = [
+    { ...schemaV1Common, schemaVersion: 1 },
+    schemaV2,
+    { ...schemaV3, schemaVersion: 3 },
+    schemaV4,
+  ];
+  for (const report of legacyReports) {
+    await writeFile(join(cwd, DEFAULT_REPORT_PATH), `${JSON.stringify(report)}\n`, "utf8");
+    const result = await invoke(["summary"], { cwd });
+    assert.equal(result.exitCode, 1, `schema v${report.schemaVersion}`);
+    assert.match(result.stderr, /requires the current unified report schema v5/u);
+    assert.match(result.stderr, /rerun PrivacySpec with the current package/u);
+  }
+
+  await writeFile(join(cwd, DEFAULT_REPORT_PATH), "not-json", "utf8");
+  const malformed = await invoke(["summary"], { cwd });
+  assert.equal(malformed.exitCode, 1);
+  assert.match(malformed.stderr, /not valid JSON/u);
+
+  await rm(join(cwd, DEFAULT_REPORT_PATH));
+  const missing = await invoke(["summary"], { cwd });
+  assert.equal(missing.exitCode, 1);
+  assert.match(missing.stderr, /No PrivacySpec JSON report/u);
+
+  await writeFile(
+    join(cwd, DEFAULT_REPORT_PATH),
+    JSON.stringify({ ...current, schemaVersion: 6 }),
+    "utf8",
+  );
+  const unsupported = await invoke(["summary"], { cwd });
+  assert.equal(unsupported.exitCode, 1);
+  assert.match(unsupported.stderr, /unsupported PrivacySpec JSON report schema/u);
 });
 
 test("testdata scan supports every format and private atomic output", async (context) => {
@@ -254,7 +447,7 @@ test("inventory reads the default report and supports every stdout format", asyn
 
   const expected = [
     { args: ["inventory"], pattern: /Runtime Privacy Inventory/u },
-    { args: ["inventory", "--format", "json"], pattern: /"inventorySchemaVersion": 1/u },
+    { args: ["inventory", "--format", "json"], pattern: /"inventorySchemaVersion": 2/u },
     { args: ["inventory", "--format", "csv"], pattern: /recordType,sourceRun/u },
     {
       args: ["inventory", "--format", "markdown"],
@@ -308,7 +501,7 @@ test("inventory rejects missing, malformed, and unsupported source reports", asy
 
   await writeFile(
     join(cwd, DEFAULT_REPORT_PATH),
-    JSON.stringify({ ...emptyReport(), schemaVersion: 5 }),
+    JSON.stringify({ ...emptyReport(), schemaVersion: 6 }),
     "utf8",
   );
   const unsupported = await invoke(["inventory"], { cwd });
@@ -410,7 +603,7 @@ test("evidence supports Markdown and JSON with only explicit build identifiers",
   assert.equal(json.exitCode, 0);
   assert.equal(json.stderr, "");
   const parsed = JSON.parse(json.stdout);
-  assert.equal(parsed.evidenceSchemaVersion, 1);
+  assert.equal(parsed.evidenceSchemaVersion, 2);
   assert.equal(parsed.evidenceKind, "AUDIT_SUPPORTING_TECHNICAL_EVIDENCE");
   assert.deepEqual(parsed.build, { commit: "6d7a6b0", buildId: "ci-1701" });
   assert.equal(parsed.execution.sourceRunState, "COMPLETE");
@@ -770,6 +963,353 @@ test("CI refuses baseline mutation even with --yes", async (context) => {
   assert.equal(await readBaselineFile(join(cwd, DEFAULT_BASELINE_PATH)), undefined);
 });
 
+test("baseline propose is read-only and selective acceptance preserves unselected entries", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const baselinePath = join(cwd, "config", "privacy.json");
+  const latestPath = join(cwd, "artifacts", "privacy.json");
+  const proposalPath = join(cwd, "review", "proposal.json");
+  const added = privacyCandidateAt("json.added");
+  const removed = privacyCandidateAt("json.removed");
+  await writeBaselineFile(baselinePath, [candidate, removed], {
+    createdAt: "2026-08-23T10:00:00.000Z",
+  });
+  await writeLatestRunFile(latestPath, [candidate, added], {
+    complete: true,
+    createdAt: "2026-08-23T10:30:00.000Z",
+  });
+  const before = await readFile(baselinePath, "utf8");
+
+  const proposed = await invoke(
+    [
+      "baseline",
+      "propose",
+      "--baseline",
+      "config/privacy.json",
+      "--report",
+      "artifacts/privacy.json",
+      "--proposal",
+      "review/proposal.json",
+    ],
+    { cwd },
+  );
+  assert.equal(proposed.exitCode, 0);
+  assert.match(proposed.stdout, /known=1, add=1, change=0, remove=1/u);
+  assert.match(proposed.stdout, /accepted baselines were not changed/u);
+  assert.equal(await readFile(baselinePath, "utf8"), before);
+  assert.equal((await stat(proposalPath)).mode & 0o777, 0o600);
+
+  const proposal = await readBaselineProposalFile(proposalPath);
+  const add = proposal.entries.find((entry) => entry.action === "add");
+  assert.ok(add);
+  const accepted = await invoke(
+    [
+      "baseline",
+      "accept",
+      "--proposal",
+      "review/proposal.json",
+      "--baseline",
+      "config/privacy.json",
+      "--report",
+      "artifacts/privacy.json",
+      "--select",
+      add.id,
+      "--yes",
+    ],
+    { cwd },
+  );
+  assert.equal(accepted.exitCode, 0);
+  assert.match(accepted.stdout, /add=1, change=0, remove=0/u);
+  assert.match(accepted.stdout, /Unselected accepted baseline entries were preserved/u);
+  const afterAdd = await readBaselineFile(baselinePath);
+  assert.equal(afterAdd?.flows.length, 3);
+  assert.equal(
+    afterAdd?.flows.some((entry) => entry.key === removed.key),
+    true,
+  );
+  assert.equal((await stat(baselinePath)).mode & 0o777, 0o600);
+
+  const reproposed = await invoke(
+    [
+      "baseline",
+      "propose",
+      "--baseline",
+      "config/privacy.json",
+      "--report",
+      "artifacts/privacy.json",
+      "--proposal",
+      "review/proposal.json",
+    ],
+    { cwd },
+  );
+  assert.equal(reproposed.exitCode, 0);
+  const removalProposal = await readBaselineProposalFile(proposalPath);
+  const remove = removalProposal.entries.find((entry) => entry.action === "remove");
+  assert.ok(remove);
+  const acceptedRemoval = await invoke(
+    [
+      "baseline",
+      "accept",
+      "--proposal",
+      "review/proposal.json",
+      "--baseline",
+      "config/privacy.json",
+      "--report",
+      "artifacts/privacy.json",
+      "--select",
+      remove.id,
+      "--yes",
+    ],
+    { cwd },
+  );
+  assert.equal(acceptedRemoval.exitCode, 0);
+  assert.match(acceptedRemoval.stdout, /add=0, change=0, remove=1/u);
+  assert.equal((await readBaselineFile(baselinePath))?.flows.length, 2);
+});
+
+test("baseline accept supports several and no selections without display-order semantics", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const added = privacyCandidateAt("json.several-added");
+  const removed = privacyCandidateAt("json.several-removed");
+  await writeBaselineFile(join(cwd, DEFAULT_BASELINE_PATH), [candidate, removed]);
+  await writeLatestRunFile(join(cwd, DEFAULT_LATEST_RUN_PATH), [candidate, added], {
+    complete: true,
+  });
+  assert.equal((await invoke(["baseline", "propose"], { cwd })).exitCode, 0);
+  const proposalPath = join(cwd, DEFAULT_BASELINE_PROPOSAL_PATH);
+  const proposal = await readBaselineProposalFile(proposalPath);
+  const before = await readFile(join(cwd, DEFAULT_BASELINE_PATH), "utf8");
+
+  const none = await invoke(["baseline", "accept", "--yes"], { cwd });
+  assert.equal(none.exitCode, 0);
+  assert.match(none.stdout, /No baseline proposal entries selected/u);
+  assert.equal(await readFile(join(cwd, DEFAULT_BASELINE_PATH), "utf8"), before);
+
+  const several = await invoke(
+    ["baseline", "accept", ...proposal.entries.flatMap((entry) => ["--select", entry.id]), "--yes"],
+    { cwd },
+  );
+  assert.equal(several.exitCode, 0);
+  assert.match(several.stdout, /2 selected proposal entries/u);
+  const baseline = await readBaselineFile(join(cwd, DEFAULT_BASELINE_PATH));
+  assert.deepEqual(
+    baseline?.flows.map((entry) => entry.key),
+    [candidate.key, added.key].toSorted(),
+  );
+});
+
+test("baseline proposal and acceptance work for every module", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const modules = [
+    {
+      module: "privacy",
+      candidate,
+      writeLatest: (path) => writeLatestRunFile(path, [candidate], { complete: true }),
+      readBaseline: readBaselineFile,
+      count: (baseline) => baseline?.flows.length,
+    },
+    {
+      module: "dependencies",
+      candidate: dependencyCandidate,
+      writeLatest: (path) =>
+        writeDependencyLatestRunFile(path, [dependencyCandidate], { complete: true }),
+      readBaseline: readDependencyBaselineFile,
+      count: (baseline) => baseline?.dependencies.length,
+    },
+    {
+      module: "security",
+      candidate: securityCandidate,
+      writeLatest: (path) =>
+        writeSecurityLatestRunFile(path, [securityCandidate], { complete: true }),
+      readBaseline: readSecurityBaselineFile,
+      count: (baseline) => baseline?.entries.length,
+    },
+    {
+      module: "runtime",
+      candidate: runtimeFailureCandidate,
+      writeLatest: (path) =>
+        writeRuntimeFailureLatestRunFile(path, [runtimeFailureCandidate], { complete: true }),
+      readBaseline: readRuntimeFailureBaselineFile,
+      count: (baseline) => baseline?.entries.length,
+    },
+  ];
+
+  for (const descriptor of modules) {
+    const baseline = `${descriptor.module}-baseline.json`;
+    const latest = `${descriptor.module}-latest.json`;
+    const proposal = `${descriptor.module}-proposal.json`;
+    await descriptor.writeLatest(join(cwd, latest));
+    const proposed = await invoke(
+      [
+        "baseline",
+        "propose",
+        "--module",
+        descriptor.module,
+        "--baseline",
+        baseline,
+        "--report",
+        latest,
+        "--proposal",
+        proposal,
+      ],
+      { cwd },
+    );
+    assert.equal(proposed.exitCode, 0, descriptor.module);
+    const artifact = await readBaselineProposalFile(join(cwd, proposal));
+    assert.equal(artifact.module, descriptor.module);
+    assert.equal(artifact.entries[0]?.identity, descriptor.candidate.key);
+    const accepted = await invoke(
+      [
+        "baseline",
+        "accept",
+        "--proposal",
+        proposal,
+        "--baseline",
+        baseline,
+        "--report",
+        latest,
+        "--select",
+        artifact.entries[0].id,
+        "--yes",
+      ],
+      { cwd },
+    );
+    assert.equal(accepted.exitCode, 0, descriptor.module);
+    assert.equal(descriptor.count(await descriptor.readBaseline(join(cwd, baseline))), 1);
+  }
+});
+
+test("baseline accept confirmation, cancellation, non-interactive, and CI policies are explicit", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  await writeLatestRunFile(join(cwd, DEFAULT_LATEST_RUN_PATH), [candidate], { complete: true });
+  assert.equal((await invoke(["baseline", "propose"], { cwd })).exitCode, 0);
+  const proposal = await readBaselineProposalFile(join(cwd, DEFAULT_BASELINE_PROPOSAL_PATH));
+  const selection = proposal.entries[0]?.id;
+  assert.ok(selection);
+
+  const nonInteractive = await invoke(["baseline", "accept", "--select", selection], { cwd });
+  assert.equal(nonInteractive.exitCode, 1);
+  assert.match(nonInteractive.stderr, /requires --yes/u);
+
+  const cancelled = await invoke(["baseline", "accept", "--select", selection], {
+    cwd,
+    interactive: true,
+    confirm: false,
+  });
+  assert.equal(cancelled.exitCode, 0);
+  assert.match(cancelled.stdout, /cancelled/u);
+  assert.equal(cancelled.questions.length, 1);
+  assert.equal(await readBaselineFile(join(cwd, DEFAULT_BASELINE_PATH)), undefined);
+
+  const ci = await invoke(["baseline", "accept", "--select", selection, "--yes"], {
+    cwd,
+    env: { CI: "true" },
+  });
+  assert.equal(ci.exitCode, 1);
+  assert.match(ci.stderr, /acceptance is disabled when CI is enabled/u);
+  assert.equal(await readBaselineFile(join(cwd, DEFAULT_BASELINE_PATH)), undefined);
+
+  const confirmed = await invoke(["baseline", "accept", "--select", selection], {
+    cwd,
+    interactive: true,
+    confirm: true,
+  });
+  assert.equal(confirmed.exitCode, 0);
+  assert.equal(confirmed.questions.length, 1);
+  assert.equal((await readBaselineFile(join(cwd, DEFAULT_BASELINE_PATH)))?.flows.length, 1);
+});
+
+test("baseline accept rejects unknown, duplicate, cross-module, stale, and tampered selections", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const latestPath = join(cwd, DEFAULT_LATEST_RUN_PATH);
+  const proposalPath = join(cwd, DEFAULT_BASELINE_PROPOSAL_PATH);
+  await writeLatestRunFile(latestPath, [candidate], {
+    complete: true,
+    createdAt: "2026-08-23T10:00:00.000Z",
+  });
+  assert.equal((await invoke(["baseline", "propose"], { cwd })).exitCode, 0);
+  const proposal = await readBaselineProposalFile(proposalPath);
+  const selection = proposal.entries[0]?.id;
+  assert.ok(selection);
+  const digest = "0".repeat(64);
+
+  for (const selections of [
+    [`privacy:add:sha256:${digest}`],
+    [selection, selection],
+    [`security:add:sha256:${digest}`],
+  ]) {
+    const result = await invoke(
+      ["baseline", "accept", ...selections.flatMap((id) => ["--select", id]), "--yes"],
+      { cwd },
+    );
+    assert.equal(result.exitCode, 1);
+    assert.equal(await readBaselineFile(join(cwd, DEFAULT_BASELINE_PATH)), undefined);
+  }
+
+  const tampered = structuredClone(proposal);
+  tampered.counts.add = 99;
+  await writeFile(proposalPath, `${JSON.stringify(tampered)}\n`, { mode: 0o600 });
+  const rejectedTamper = await invoke(["baseline", "accept", "--select", selection, "--yes"], {
+    cwd,
+  });
+  assert.equal(rejectedTamper.exitCode, 1);
+  assert.match(rejectedTamper.stderr, /proposal/u);
+  assert.equal(await readBaselineFile(join(cwd, DEFAULT_BASELINE_PATH)), undefined);
+
+  assert.equal((await invoke(["baseline", "propose"], { cwd })).exitCode, 0);
+  const fresh = await readBaselineProposalFile(proposalPath);
+  await writeLatestRunFile(latestPath, [candidate], {
+    complete: true,
+    createdAt: "2026-08-23T12:00:00.000Z",
+  });
+  const stale = await invoke(["baseline", "accept", "--select", fresh.entries[0].id, "--yes"], {
+    cwd,
+  });
+  assert.equal(stale.exitCode, 1);
+  assert.match(stale.stderr, /stale, tampered/u);
+  assert.equal(await readBaselineFile(join(cwd, DEFAULT_BASELINE_PATH)), undefined);
+});
+
+test("baseline proposal paths reject source collisions and symbolic links", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const latestPath = join(cwd, "latest.json");
+  await writeLatestRunFile(latestPath, [candidate], { complete: true });
+
+  const collision = await invoke(
+    ["baseline", "propose", "--report", "latest.json", "--proposal", "latest.json"],
+    { cwd },
+  );
+  assert.equal(collision.exitCode, 1);
+  assert.match(collision.stderr, /must be distinct/u);
+
+  const linkedLatest = join(cwd, "linked-latest.json");
+  await symlink(latestPath, linkedLatest);
+  const linkedSource = await invoke(["baseline", "propose", "--report", "linked-latest.json"], {
+    cwd,
+  });
+  assert.equal(linkedSource.exitCode, 1);
+  assert.match(linkedSource.stderr, /symbolic links/u);
+
+  const proposalTarget = join(cwd, "proposal-target.json");
+  await writeFile(proposalTarget, "{}\n");
+  const linkedProposal = join(cwd, "proposal-link.json");
+  await symlink(proposalTarget, linkedProposal);
+  const linkedOutput = await invoke(
+    ["baseline", "propose", "--report", "latest.json", "--proposal", "proposal-link.json"],
+    { cwd },
+  );
+  assert.equal(linkedOutput.exitCode, 1);
+  assert.match(linkedOutput.stderr, /symbolic links/u);
+});
+
+test("baseline propose requires complete latest-run eligibility", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  await writeLatestRunFile(join(cwd, DEFAULT_LATEST_RUN_PATH), [], { complete: false });
+  const result = await invoke(["baseline", "propose"], { cwd });
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /incomplete/u);
+  assert.equal(await readBaselineFile(join(cwd, DEFAULT_BASELINE_PATH)), undefined);
+});
+
 test("CLI rejects unknown, duplicate, and missing-value flags", async (context) => {
   const cwd = await temporaryDirectory(context);
   const cases = [
@@ -796,6 +1336,19 @@ test("CLI rejects unknown, duplicate, and missing-value flags", async (context) 
     },
     { args: ["baseline", "update", "--yes", "--yes"], message: /only once/u },
     { args: ["baseline", "update", "extra"], message: /Unexpected argument/u },
+    { args: ["baseline", "propose", "--yes"], message: /Unexpected argument/u },
+    { args: ["baseline", "propose", "--proposal"], message: /requires a path value/u },
+    {
+      args: ["baseline", "propose", "--proposal", "one.json", "--proposal", "two.json"],
+      message: /only once/u,
+    },
+    { args: ["baseline", "accept", "--module", "privacy"], message: /Unexpected argument/u },
+    { args: ["baseline", "accept", "--select"], message: /requires a proposal ID/u },
+    { args: ["baseline", "accept", "--yes", "--yes"], message: /only once/u },
+    {
+      args: ["baseline", "accept", "--proposal", "one.json", "--proposal", "two.json"],
+      message: /only once/u,
+    },
     { args: ["inventory", "--report"], message: /requires a path value/u },
     {
       args: ["inventory", "--report", "one.json", "--report", "two.json"],

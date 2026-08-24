@@ -1,6 +1,6 @@
 # Legal mapping policy
 
-**Status:** Phase 9 prototype policy
+**Status:** Current beta policy
 **Mappings last reviewed:** 2026-08-20
 
 PrivacySpec reports browser-side technical observations. Its mapping layer explains why an
@@ -21,7 +21,7 @@ Contextual EU regulatory relevance
 The rule engine remains the source of technical findings. The local registry in
 `packages/privacyspec/src/rules/legal-map.ts` is keyed by the existing stable rule ID. Mapping text,
 source URLs, and review dates do not enter semantic baseline keys and are not duplicated into the
-per-test Playwright attachment. Phase 10 reporting can resolve the same rule ID into aggregate
+per-test Playwright attachment. Reporting resolves the same rule ID into aggregate
 report metadata.
 
 The registry uses these relationship strengths:
@@ -90,8 +90,11 @@ and risk-appropriate measures.
 
 In particular:
 
-- an email address or telephone number is personal data in PrivacySpec's taxonomy, but that alone
-  does not establish the application's ASVS sensitivity classification;
+- email, telephone, name, postal-address, date-of-birth, explicit account-identifier, payment-card,
+  gender-identity, and job-title controls are personal-data categories in PrivacySpec's technical
+  taxonomy, but a category alone does not establish that the value identifies a person, that a
+  card/account is active, PCI scope, a special-category legal classification, or the application's
+  ASVS sensitivity classification;
 - a non-first-party origin is not automatically untrusted, unauthorized, or a GDPR third party;
 - a browser URL fragment may never be sent to a server;
 - browser storage can be necessary, and the ASVS browser-storage control explicitly excepts session

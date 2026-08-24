@@ -12,6 +12,7 @@ blob-report/
 
 # PrivacySpec runtime artifacts
 .privacyspec/
+.privacyspec-parts/
 privacyspec-report.json
 # Pre-rename artifacts remain ignored so a checkout update cannot expose old sensitive test output.
 .conformtest/

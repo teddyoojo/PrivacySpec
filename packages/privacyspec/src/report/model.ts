@@ -11,16 +11,23 @@ import type { BaselineComparison } from "../baseline/compare.js";
 import type { BaselineFlow, BaselineFlowCandidate } from "../baseline/schema.js";
 import type { DataFlow, DataFlowSourceKind } from "../correlate/model.js";
 import type { PlaywrightObservationCounters } from "../playwright/coverage.js";
+import type {
+  APIRequestCoverage,
+  BrowserEngineCapability,
+  PrivacySpecBrowserEngine,
+} from "../playwright/experimental-coverage.js";
 import type { ReportLevelLegalMapping, RuleLegalMapping } from "../rules/legal-map.js";
 import type { Finding } from "../rules/model.js";
+import type { RuntimeCapabilityState } from "../runtime/capabilities.js";
 import { createTestDataSection } from "../testdata/create.js";
 import type { PrivacySpecTestDataSection, TestDataObservation } from "../testdata/model.js";
 
 export const REPORT_SCHEMA_VERSION_V1 = 1 as const;
 export const REPORT_SCHEMA_VERSION_V2 = 2 as const;
 export const REPORT_SCHEMA_VERSION_V3 = 3 as const;
-export const REPORT_SCHEMA_VERSION = 4 as const;
-export const PRIVACYSPEC_TOOL_VERSION = "0.1.0-beta.2" as const;
+export const REPORT_SCHEMA_VERSION_V4 = 4 as const;
+export const REPORT_SCHEMA_VERSION = 5 as const;
+export const PRIVACYSPEC_TOOL_VERSION = "0.1.0-beta.3" as const;
 export const DEFAULT_REPORT_PATH = "privacyspec-report.json";
 
 export type PrivacySpecRunStatus = "passed" | "review" | "failed" | "incomplete";
@@ -39,7 +46,11 @@ export interface ObservationCoverageDiagnostic {
     | "COVERAGE_OPTIONAL_OBSERVER_SKIPPED"
     | "COVERAGE_RESULT_UNAVAILABLE"
     | "COVERAGE_TEST_SCOPE_INCOMPLETE"
-    | "COVERAGE_UNSUPPORTED_CONTEXT";
+    | "COVERAGE_UNSUPPORTED_CONTEXT"
+    | "COVERAGE_UNSUPPORTED_BROWSER_ENGINE"
+    | "COVERAGE_BROWSER_ENGINE_CAPABILITY_LIMITED"
+    | "COVERAGE_API_REQUEST_PARTIAL"
+    | "COVERAGE_API_REQUEST_UNSUPPORTED";
   message: string;
 }
 
@@ -254,15 +265,58 @@ export interface SecondaryAnalysisReport {
 }
 
 export interface PrivacySpecJsonReportV4 extends Omit<PrivacySpecJsonReportV3, "schemaVersion"> {
-  schemaVersion: typeof REPORT_SCHEMA_VERSION;
+  schemaVersion: typeof REPORT_SCHEMA_VERSION_V4;
   analysis: SecondaryAnalysisReport;
+}
+
+export interface BrowserEngineReportCoverage {
+  experimental: true;
+  tests: {
+    supported: number;
+    experimental: number;
+    unsupported: number;
+    unavailable: number;
+  };
+  engines: Record<
+    PrivacySpecBrowserEngine,
+    {
+      tests: number;
+      support: "supported" | "experimental" | "unsupported";
+      capabilities: Record<BrowserEngineCapability, RuntimeCapabilityState>;
+    }
+  >;
+}
+
+export interface APIRequestReportCoverage {
+  experimental: true;
+  tests: {
+    enabled: number;
+    disabled: number;
+    unavailable: number;
+    complete: number;
+    partial: number;
+    unsupported: number;
+  };
+  calls: APIRequestCoverage["calls"];
+  skipped: APIRequestCoverage["skipped"];
+  blindSpots: APIRequestCoverage["blindSpots"];
+}
+
+export interface PrivacySpecJsonReportV5
+  extends Omit<PrivacySpecJsonReportV4, "schemaVersion" | "coverage"> {
+  schemaVersion: typeof REPORT_SCHEMA_VERSION;
+  coverage: PrivacySpecJsonReportV4["coverage"] & {
+    browserEngines: BrowserEngineReportCoverage;
+    apiRequests: APIRequestReportCoverage;
+  };
 }
 
 export type PrivacySpecJsonReport =
   | PrivacySpecJsonReportV1
   | PrivacySpecJsonReportV2
   | PrivacySpecJsonReportV3
-  | PrivacySpecJsonReportV4;
+  | PrivacySpecJsonReportV4
+  | PrivacySpecJsonReportV5;
 
 export interface SecondaryAnalysisInput {
   dependencies: DependencyReport;
@@ -294,6 +348,8 @@ export interface CreatePrivacySpecReportInput {
   playwrightCoverage?: PlaywrightInstrumentationReportCoverage | undefined;
   networkCoverage?: NetworkObservationReportCoverage | undefined;
   observationCoverage?: ObservationCoverageReport | undefined;
+  browserEngineCoverage?: BrowserEngineReportCoverage | undefined;
+  apiRequestCoverage?: APIRequestReportCoverage | undefined;
   testDataObservations?: readonly TestDataObservation[] | undefined;
   secondaryAnalysis?: SecondaryAnalysisInput | undefined;
 }
@@ -312,6 +368,28 @@ const countSummary = (counts: ReadonlyMap<string, number>): CountByName => {
 
 const findingIdentity = (finding: Finding): string =>
   JSON.stringify([finding.ruleId, finding.flow]);
+
+const withRequestSurface = (flow: DataFlow): DataFlow => ({
+  ...flow,
+  requestSurface: flow.requestSurface ?? "browser",
+});
+
+const findingWithRequestSurface = (finding: Finding): Finding => ({
+  ...finding,
+  flow: withRequestSurface(finding.flow),
+});
+
+const comparisonWithRequestSurfaces = (comparison: BaselineComparison): BaselineComparison => ({
+  ...comparison,
+  known: comparison.known.map((entry) => ({
+    ...entry,
+    findings: entry.findings.map(findingWithRequestSurface),
+  })),
+  new: comparison.new.map((entry) => ({
+    ...entry,
+    findings: entry.findings.map(findingWithRequestSurface),
+  })),
+});
 
 const privacyAnalysisStatus = (
   complete: boolean,
@@ -451,19 +529,25 @@ const reportFindings = (
 
 export const createPrivacySpecReport = (
   input: CreatePrivacySpecReportInput,
-): PrivacySpecJsonReportV4 => {
-  const findings = reportFindings(input.findings, input.comparison);
-  const technicalFailures = input.findings.filter(
+): PrivacySpecJsonReportV5 => {
+  const normalizedFlows = input.flows.map(withRequestSurface);
+  const normalizedInputFindings = input.findings.map(findingWithRequestSurface);
+  const suppliedComparison = comparisonWithRequestSurfaces(input.comparison);
+  const normalizedComparison: BaselineComparison = input.complete
+    ? suppliedComparison
+    : { observed: suppliedComparison.observed, known: [], new: [], resolved: [] };
+  const findings = reportFindings(normalizedInputFindings, normalizedComparison);
+  const technicalFailures = normalizedInputFindings.filter(
     (finding) => finding.classification === "technical_failure",
   ).length;
-  const reviewRequired = input.findings.filter(
+  const reviewRequired = normalizedInputFindings.filter(
     (finding) => finding.classification === "review_required",
   ).length;
-  const newReviewRequired = input.comparison.new.reduce(
+  const newReviewRequired = normalizedComparison.new.reduce(
     (count, observed) => count + observed.findings.length,
     0,
   );
-  const knownReviewRequired = input.comparison.known.reduce(
+  const knownReviewRequired = normalizedComparison.known.reduce(
     (count, observed) => count + observed.findings.length,
     0,
   );
@@ -504,22 +588,102 @@ export const createPrivacySpecReport = (
           },
         ],
   };
+  const browserEngineCoverage: BrowserEngineReportCoverage = input.browserEngineCoverage ?? {
+    experimental: true,
+    tests: { supported: input.tests.observed, experimental: 0, unsupported: 0, unavailable: 0 },
+    engines: {
+      chromium: {
+        tests: input.tests.observed,
+        support: "supported",
+        capabilities: {
+          "init-scripts": "complete",
+          events: "complete",
+          "teardown-fallback": "complete",
+          network: "complete",
+          console: "complete",
+          storage: "complete",
+          cookies: "complete",
+          "response-headers": "complete",
+          "page-errors": "complete",
+        },
+      },
+      firefox: {
+        tests: 0,
+        support: "unsupported",
+        capabilities: {
+          "init-scripts": "unsupported",
+          events: "unsupported",
+          "teardown-fallback": "unsupported",
+          network: "unsupported",
+          console: "unsupported",
+          storage: "unsupported",
+          cookies: "unsupported",
+          "response-headers": "unsupported",
+          "page-errors": "unsupported",
+        },
+      },
+      webkit: {
+        tests: 0,
+        support: "unsupported",
+        capabilities: {
+          "init-scripts": "unsupported",
+          events: "unsupported",
+          "teardown-fallback": "unsupported",
+          network: "unsupported",
+          console: "unsupported",
+          storage: "unsupported",
+          cookies: "unsupported",
+          "response-headers": "unsupported",
+          "page-errors": "unsupported",
+        },
+      },
+    },
+  };
+  const apiRequestCoverage: APIRequestReportCoverage = input.apiRequestCoverage ?? {
+    experimental: true,
+    tests: {
+      enabled: 0,
+      disabled: input.tests.observed,
+      unavailable: 0,
+      complete: input.tests.observed,
+      partial: 0,
+      unsupported: 0,
+    },
+    calls: { seen: 0, observed: 0, failed: 0, serverErrors: 0 },
+    skipped: {
+      accessors: 0,
+      streams: 0,
+      files: 0,
+      unsupportedObjects: 0,
+      oversized: 0,
+      aggregateLimit: 0,
+      sinkLimit: 0,
+      materialLimit: 0,
+    },
+    blindSpots: [
+      "implicit-headers-cookies-auth",
+      "redirect-chain",
+      "page-request",
+      "context-request",
+      "manual-request-context",
+    ],
+  };
 
   const summary: PrivacySpecJsonReportCommon["summary"] = {
     sensitiveSources: countSummary(input.sourceCounts),
     sinks: countSummary(input.sinkCounts),
-    dataFlows: input.flows.length,
+    dataFlows: normalizedFlows.length,
     findings: {
-      total: input.findings.length,
+      total: normalizedInputFindings.length,
       technicalFailures,
       reviewRequired,
       newReviewRequired,
       knownReviewRequired,
     },
     baseline: {
-      known: input.comparison.known.length,
-      new: input.comparison.new.length,
-      resolved: input.comparison.resolved.length,
+      known: normalizedComparison.known.length,
+      new: normalizedComparison.new.length,
+      resolved: normalizedComparison.resolved.length,
     },
   };
 
@@ -540,13 +704,13 @@ export const createPrivacySpecReport = (
       suiteDurationMilliseconds: input.suiteDurationMilliseconds,
       cumulativeTestDurationMilliseconds: input.cumulativeTestDurationMilliseconds,
     },
-    flows: [...input.flows],
+    flows: normalizedFlows,
     findings,
     baseline: {
       exists: input.baselineExists,
-      known: input.comparison.known,
-      new: input.comparison.new,
-      resolved: input.comparison.resolved,
+      known: normalizedComparison.known,
+      new: normalizedComparison.new,
+      resolved: normalizedComparison.resolved,
     },
     diagnostics: [...input.diagnostics],
     integrationErrors: [...input.integrationErrors],
@@ -588,6 +752,8 @@ export const createPrivacySpecReport = (
         },
         skipped: { ...responseCoverage.skipped },
       },
+      browserEngines: structuredClone(browserEngineCoverage),
+      apiRequests: structuredClone(apiRequestCoverage),
     },
     testData: createTestDataSection(input.testDataObservations ?? []),
     analysis: createSecondaryAnalysisReport({

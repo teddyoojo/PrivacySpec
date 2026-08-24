@@ -1,5 +1,13 @@
 import { relative } from "node:path";
-import type { Browser, BrowserContext, Page, Request, Response, TestType } from "@playwright/test";
+import type {
+  APIRequestContext,
+  Browser,
+  BrowserContext,
+  Page,
+  Request,
+  Response,
+  TestType,
+} from "@playwright/test";
 import {
   DependencyRuntimeAnalyzer,
   dependencyAnalyzerFailed,
@@ -44,6 +52,11 @@ import {
 } from "../analyzers/security/model.js";
 import { MAX_PAGE_URLS_PER_TEST } from "../correlate/match.js";
 import type { FirstPartyConfig } from "../correlate/model.js";
+import { normalizeClassifierConfiguration } from "../discovery/classifier-configuration.js";
+import {
+  type CustomDomSourceClassifier,
+  normalizeCustomDomSourceClassifiers,
+} from "../discovery/custom-classifiers.js";
 import { createResponseJsonCoverage } from "../discovery/response-json.js";
 import type { PrivacySpecObservation } from "../observation-model.js";
 import { ConsoleObserver } from "../observe/console.js";
@@ -59,11 +72,20 @@ import { createRuntimeCapabilityModel } from "../runtime/capabilities.js";
 import { normalizeSyntheticEmailDomains } from "../testdata/classify.js";
 import { createTestDataAttachment } from "../testdata/create.js";
 import {
+  APIRequestFixtureObserver,
+  createObservedAPIRequestContext,
+} from "./api-request-observer.js";
+import {
   collectSensitiveSources,
   createBrowserObserverScript,
   SOURCE_STREAM_BINDING,
 } from "./browser-observer.js";
 import { activatePlaywrightCoverage, createCoverageAwareBrowser } from "./coverage.js";
+import {
+  createBrowserEngineCoverage,
+  normalizePrivacySpecExperimentalOptions,
+  type PrivacySpecExperimentalOptions,
+} from "./experimental-coverage.js";
 import { finalizationDiagnostics, PendingWorkRegistry } from "./finalization.js";
 import { FirstPartyJsonResponseObserver } from "./response-observer.js";
 import {
@@ -83,6 +105,11 @@ interface BrowserContextFixture {
 
 interface BrowserWorkerFixture {
   browser: Browser;
+  browserName: string;
+}
+
+interface APIRequestFixture {
+  request: APIRequestContext;
 }
 
 interface DisposableLike {
@@ -95,6 +122,8 @@ const isDisposableLike = (resource: unknown): resource is DisposableLike =>
   "dispose" in resource &&
   typeof resource.dispose === "function";
 
+const requestObservers = new WeakMap<object, APIRequestFixtureObserver>();
+
 export const disposePlaywrightResources = async (resources: readonly unknown[]): Promise<void> => {
   const availableResources = resources.filter(isDisposableLike);
   await Promise.allSettled(availableResources.map((resource) => resource.dispose()));
@@ -105,6 +134,8 @@ export interface PrivacySpecOptions {
   sources?:
     | {
         firstPartyJsonResponses?: boolean | undefined;
+        customClassifiers?: readonly CustomDomSourceClassifier[] | undefined;
+        customClassifierConfigurationId?: string | undefined;
       }
     | undefined;
   testData?:
@@ -117,6 +148,7 @@ export interface PrivacySpecOptions {
         allowInsecureOrigins?: readonly string[] | undefined;
       }
     | undefined;
+  experimental?: PrivacySpecExperimentalOptions | undefined;
 }
 
 export const withPrivacySpec = <TestArgs extends {}, WorkerArgs extends {}>(
@@ -126,19 +158,35 @@ export const withPrivacySpec = <TestArgs extends {}, WorkerArgs extends {}>(
   const syntheticEmailDomains = normalizeSyntheticEmailDomains(
     options.testData?.syntheticEmailDomains,
   );
+  const customClassifiers = normalizeCustomDomSourceClassifiers(options.sources?.customClassifiers);
+  const classifierConfiguration = normalizeClassifierConfiguration(
+    customClassifiers,
+    options.sources?.customClassifierConfigurationId,
+  );
+  const experimental = normalizePrivacySpecExperimentalOptions(options.experimental);
   const extensibleTest = baseTest as unknown as TestType<
-    BrowserContextFixture,
+    BrowserContextFixture & APIRequestFixture,
     BrowserWorkerFixture
   >;
   const extendedTest = extensibleTest.extend<AutomaticPrivacySpecFixture>({
     browser: [
-      async ({ browser }, use) => {
-        await use(createCoverageAwareBrowser(browser));
+      async ({ browser, browserName }, use) => {
+        const coverage = createBrowserEngineCoverage(browserName, experimental.browserEngines);
+        await use(
+          coverage.support === "unsupported" ? browser : createCoverageAwareBrowser(browser),
+        );
       },
       { scope: "worker" },
     ],
+    request: async ({ request, __conformTestAutomatic }, use, testInfo) => {
+      void __conformTestAutomatic;
+      const observer = requestObservers.get(testInfo);
+      await use(
+        observer === undefined ? request : createObservedAPIRequestContext(request, observer),
+      );
+    },
     __conformTestAutomatic: [
-      async ({ browser, context }, use, testInfo) => {
+      async ({ browser, browserName, context }, use, testInfo) => {
         const testMetadata = {
           testId:
             testInfo.testId ||
@@ -148,6 +196,11 @@ export const withPrivacySpec = <TestArgs extends {}, WorkerArgs extends {}>(
           projectName: testInfo.project.name,
         };
         const configuredBaseUrl = testInfo.project.use.baseURL;
+        const browserEngineCoverage = createBrowserEngineCoverage(
+          browserName,
+          experimental.browserEngines,
+        );
+        const observersEnabled = browserEngineCoverage.support !== "unsupported";
         const firstParty: FirstPartyConfig = {
           origins: [
             ...(options.firstParty?.origins ?? []),
@@ -159,6 +212,7 @@ export const withPrivacySpec = <TestArgs extends {}, WorkerArgs extends {}>(
           firstParty,
           allowInsecureOrigins: options.dev?.allowInsecureOrigins,
           syntheticEmailDomains,
+          customClassifiers,
         });
         const dependencyAnalyzer = new DependencyRuntimeAnalyzer(firstParty);
         const securityAnalyzer = new SecurityPostureAnalyzer(firstParty);
@@ -174,7 +228,14 @@ export const withPrivacySpec = <TestArgs extends {}, WorkerArgs extends {}>(
           privacyAnalyzer,
           context,
           testMetadata,
+          customClassifiers,
         );
+        const apiRequestObserver = new APIRequestFixtureObserver(
+          observersEnabled && experimental.apiRequestContext,
+          runtimeEvents,
+          typeof configuredBaseUrl === "string" ? configuredBaseUrl : undefined,
+        );
+        requestObservers.set(testInfo, apiRequestObserver);
         const pendingWork = new PendingWorkRegistry();
         let nextRequestIdentity = 0;
         const requestIdentities = new WeakMap<Request, number>();
@@ -205,13 +266,29 @@ export const withPrivacySpec = <TestArgs extends {}, WorkerArgs extends {}>(
               )
             : undefined;
         const disposables: unknown[] = [];
-        const playwrightCoverage = activatePlaywrightCoverage(browser, context, {
-          context: (observedContext, instrumented) =>
-            runtimeEvents.recordContext(observedContext, instrumented),
-          page: (page, instrumented) => runtimeEvents.recordPage(page, instrumented),
-          navigation: (page) => runtimeEvents.recordNavigation(page),
-        });
-        const instrumentedPages = new Set<Page>(context.pages());
+        const playwrightCoverage = observersEnabled
+          ? activatePlaywrightCoverage(browser, context, {
+              context: (observedContext, instrumented) =>
+                runtimeEvents.recordContext(observedContext, instrumented),
+              page: (page, instrumented) => runtimeEvents.recordPage(page, instrumented),
+              navigation: (page) => runtimeEvents.recordNavigation(page),
+            })
+          : {
+              tracker: {
+                snapshot: () => ({
+                  browserObjects: { seen: 1 },
+                  contexts: { seen: 1, instrumented: 0 },
+                  pages: {
+                    seen: context.pages().length,
+                    instrumented: 0,
+                    storageCapable: 0,
+                  },
+                  events: { navigations: 0, network: 0, console: 0 },
+                }),
+              },
+              dispose: () => undefined,
+            };
+        const instrumentedPages = new Set<Page>(observersEnabled ? context.pages() : []);
         const pageErrorListeners = new Map<Page, (error: Error) => void>();
         const attachPageErrorListener = (page: Page): void => {
           if (pageErrorListeners.has(page)) return;
@@ -219,7 +296,9 @@ export const withPrivacySpec = <TestArgs extends {}, WorkerArgs extends {}>(
           pageErrorListeners.set(page, listener);
           page.on("pageerror", listener);
         };
-        for (const page of instrumentedPages) attachPageErrorListener(page);
+        if (observersEnabled) {
+          for (const page of instrumentedPages) attachPageErrorListener(page);
+        }
         const pageListener = (page: Page): void => {
           instrumentedPages.add(page);
           attachPageErrorListener(page);
@@ -229,35 +308,41 @@ export const withPrivacySpec = <TestArgs extends {}, WorkerArgs extends {}>(
         const responseListener = (response: Response): void =>
           runtimeEvents.recordHttpResponse(response);
         try {
-          context.on("page", pageListener);
-          context.on("requestfailed", requestFailedListener);
-          context.on("response", responseListener);
-          networkObserver.attach(context);
-          consoleObserver.attach(context);
-          securityResponseObserver.attach(context);
-          responseObserver?.attach(context);
-          disposables.push(
-            await context.exposeBinding(SOURCE_STREAM_BINDING, (source, event) => {
-              runtimeEvents.recordSensitiveSourceStreamEvent(source, event);
-            }),
-          );
-          disposables.push(
-            await context.exposeBinding(STORAGE_STREAM_BINDING, (source, event) => {
-              runtimeEvents.recordStorageStreamEvent(source, event);
-            }),
-          );
-          disposables.push(
-            await context.addInitScript({
-              content: createBrowserObserverScript(runtimeEvents.sourceStreamToken),
-            }),
-          );
-          disposables.push(
-            await context.addInitScript({
-              content: createStorageObserverScript(runtimeEvents.storageStreamToken),
-            }),
-          );
+          if (observersEnabled) {
+            context.on("page", pageListener);
+            context.on("requestfailed", requestFailedListener);
+            context.on("response", responseListener);
+            networkObserver.attach(context);
+            consoleObserver.attach(context);
+            securityResponseObserver.attach(context);
+            responseObserver?.attach(context);
+            disposables.push(
+              await context.exposeBinding(SOURCE_STREAM_BINDING, (source, event) => {
+                runtimeEvents.recordSensitiveSourceStreamEvent(source, event);
+              }),
+            );
+            disposables.push(
+              await context.exposeBinding(STORAGE_STREAM_BINDING, (source, event) => {
+                runtimeEvents.recordStorageStreamEvent(source, event);
+              }),
+            );
+            disposables.push(
+              await context.addInitScript({
+                content: createBrowserObserverScript(
+                  runtimeEvents.sourceStreamToken,
+                  customClassifiers,
+                ),
+              }),
+            );
+            disposables.push(
+              await context.addInitScript({
+                content: createStorageObserverScript(runtimeEvents.storageStreamToken),
+              }),
+            );
+          }
           await use(undefined);
         } finally {
+          requestObservers.delete(testInfo);
           networkObserver.detach();
           consoleObserver.detach();
           securityResponseObserver.detach();
@@ -299,36 +384,43 @@ export const withPrivacySpec = <TestArgs extends {}, WorkerArgs extends {}>(
             if (responseObserver !== undefined) {
               trackObserverWork("responses", responseObserver.flush());
             }
-            trackObserverWork(
-              "source-fallback",
-              collectSensitiveSources(context).then((result) => {
-                if (acceptFinalizationResults) {
-                  for (const source of result.sources) {
-                    runtimeEvents.recordSensitiveSource(source, context);
+            if (observersEnabled) {
+              trackObserverWork(
+                "source-fallback",
+                collectSensitiveSources(context).then((result) => {
+                  if (acceptFinalizationResults) {
+                    for (const source of result.sources) {
+                      runtimeEvents.recordSensitiveSource(source, context);
+                    }
+                    if (result.limitReached) runtimeEvents.markSensitiveSourceLimit();
+                    if (result.customClassificationAmbiguous) {
+                      runtimeEvents.markCustomSourceClassificationAmbiguous();
+                    }
                   }
-                  if (result.limitReached) runtimeEvents.markSensitiveSourceLimit();
-                }
-                result.sources.length = 0;
-              }),
-            );
-            trackObserverWork(
-              "storage-snapshot",
-              collectFinalStorage(context).then((result) => {
-                if (acceptFinalizationResults) {
-                  for (const sink of result.sinks) runtimeEvents.recordStorage(sink, context);
-                  for (const cookie of result.securityCookies) {
-                    runtimeEvents.recordSecurityCookie(cookie);
+                  result.sources.length = 0;
+                }),
+              );
+              trackObserverWork(
+                "storage-snapshot",
+                collectFinalStorage(context).then((result) => {
+                  if (acceptFinalizationResults) {
+                    for (const sink of result.sinks) runtimeEvents.recordStorage(sink, context);
+                    for (const cookie of result.securityCookies) {
+                      runtimeEvents.recordSecurityCookie(cookie);
+                    }
+                    if (result.limitReached) runtimeEvents.markStorageLimit();
                   }
-                  if (result.limitReached) runtimeEvents.markStorageLimit();
-                }
-                result.sinks.length = 0;
-                result.securityCookies.length = 0;
-              }),
-            );
+                  result.sinks.length = 0;
+                  result.securityCookies.length = 0;
+                }),
+              );
+            }
             const analysisOperation = Promise.allSettled(observerOperations).then(async () => {
               if (!acceptFinalizationResults) return;
-              for (const page of context.pages().slice(0, MAX_PAGE_URLS_PER_TEST + 1)) {
-                runtimeEvents.recordPageUrl(page);
+              if (observersEnabled) {
+                for (const page of context.pages().slice(0, MAX_PAGE_URLS_PER_TEST + 1)) {
+                  runtimeEvents.recordPageUrl(page);
+                }
               }
               analyzerHost.closeEvents();
               await analyzerHost.flushEvents();
@@ -343,6 +435,8 @@ export const withPrivacySpec = <TestArgs extends {}, WorkerArgs extends {}>(
                   responseJson: responseCoverage,
                   observerWorkFailed,
                   responseHeaders: securityResponseObserver.snapshot(),
+                  browserEngine: browserEngineCoverage,
+                  apiRequests: apiRequestObserver.snapshot(),
                 }),
               });
               if (acceptFinalizationResults) analysisResult = completed;
@@ -383,6 +477,9 @@ export const withPrivacySpec = <TestArgs extends {}, WorkerArgs extends {}>(
               },
               networkObserver.snapshotCoverage(),
               observationCoverage,
+              browserEngineCoverage,
+              apiRequestObserver.snapshot(),
+              classifierConfiguration,
             );
             await testInfo.attach(PRIVACYSPEC_ATTACHMENT_NAME, {
               body: JSON.stringify(result),

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -22,6 +22,9 @@ import {
   readSecurityReport,
   writeSecurityBaselineFile,
 } from "../dist/analyzers/security/artifact.js";
+import { readPrivacySpecReport } from "../dist/report/read.js";
+import { aggregatePrivacySpecRunParts } from "../dist/run-scope/aggregate.js";
+import { readPrivacySpecRunPart } from "../dist/run-scope/artifact.js";
 
 const execFileAsync = promisify(execFile);
 const packageDirectory = fileURLToPath(new URL("..", import.meta.url));
@@ -44,6 +47,9 @@ const securityConfigPath = fileURLToPath(
 const runtimeFailureConfigPath = fileURLToPath(
   new URL("../fixtures/runtime-failure/playwright.config.mjs", import.meta.url),
 );
+const apiRequestConfigPath = fileURLToPath(
+  new URL("../fixtures/api-request/playwright.config.mjs", import.meta.url),
+);
 
 const runDependencyFixture = async ({ baselinePath, latestRunPath, reportPath, mode }) => {
   const environment = {
@@ -63,6 +69,24 @@ const runDependencyFixture = async ({ baselinePath, latestRunPath, reportPath, m
       cwd: packageDirectory,
       env: environment,
     },
+  );
+};
+
+const runDependencyShard = async ({ part, total, outputDirectory }) => {
+  const environment = {
+    ...process.env,
+    NO_COLOR: "1",
+    PRIVACYSPEC_DEPENDENCY_FIXTURE_MODE: "external",
+    PRIVACYSPEC_RUN_ID: "local-sharded-run",
+    PRIVACYSPEC_CONFIGURATION_ID: "dependency-observer-v1",
+    PRIVACYSPEC_RUN_PARTS_DIRECTORY: outputDirectory,
+  };
+  delete environment.FORCE_COLOR;
+  delete environment.NODE_TEST_CONTEXT;
+  return execFileAsync(
+    process.execPath,
+    [playwrightCli, "test", `--config=${dependencyConfigPath}`, `--shard=${part}/${total}`],
+    { cwd: packageDirectory, env: environment },
   );
 };
 
@@ -180,6 +204,77 @@ test("mixed fixture and independent pages cannot produce false complete coverage
   );
   assert.match(output, /Secondary coverage: FAIL/u);
   assert.match(output, /privacy\s+INCONCLUSIVE \(coverage=UNSUPPORTED/u);
+});
+
+test("gated composed request fixture emits API-surface flows and remains baseline-ineligible", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "privacyspec-api-request-browser-"));
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  const reportPath = join(directory, "report.json");
+  const latestRunPath = join(directory, "latest-run.json");
+  const environment = {
+    ...process.env,
+    NO_COLOR: "1",
+    PRIVACYSPEC_API_FIXTURE_MODE: "enabled",
+    PRIVACYSPEC_API_REPORT_PATH: reportPath,
+    PRIVACYSPEC_API_LATEST_RUN_PATH: latestRunPath,
+  };
+  delete environment.FORCE_COLOR;
+  delete environment.NODE_TEST_CONTEXT;
+  const { stdout, stderr } = await execFileAsync(
+    process.execPath,
+    [playwrightCli, "test", `--config=${apiRequestConfigPath}`],
+    { cwd: packageDirectory, env: environment },
+  );
+  const output = `${stdout}\n${stderr}`;
+  const report = await readPrivacySpecReport(reportPath);
+  const latestRun = JSON.parse(await readFile(latestRunPath, "utf8"));
+
+  assert.match(output, /1 passed/u);
+  assert.match(output, /API request fixture: calls=1, partial=1, unsupported=0/u);
+  assert.match(output, /baseline-ineligible review findings=1/u);
+  assert.match(output, /PrivacySpec baseline: known=0, new=0, resolved=0/u);
+  assert.match(output, /\[NOT_BASELINE_ELIGIBLE\].*\[surface=api-request\]/u);
+  assert.equal(report.schemaVersion, 5);
+  assert.equal(report.coverage.apiRequests.calls.seen, 1);
+  assert.equal(report.coverage.apiRequests.tests.partial, 1);
+  assert.equal(report.coverage.observation.status, "partial");
+  assert.equal(report.run.complete, false);
+  assert.equal(latestRun.complete, false);
+  assert.equal(
+    report.flows.some((flow) => flow.requestSurface === "api-request"),
+    true,
+  );
+  assert.deepEqual(report.baseline.new, []);
+  assert.equal(
+    report.findings.every((finding) => finding.baselineState === "not_baseline_eligible"),
+    true,
+  );
+  assert.equal(JSON.stringify(report).includes("api@fixture.example"), false);
+});
+
+test("ungated composed request fixture is detected without inspecting arguments and fails closed", async () => {
+  const environment = {
+    ...process.env,
+    NO_COLOR: "1",
+    PRIVACYSPEC_API_FIXTURE_MODE: "disabled",
+  };
+  delete environment.FORCE_COLOR;
+  delete environment.NODE_TEST_CONTEXT;
+  let failure;
+  try {
+    await execFileAsync(
+      process.execPath,
+      [playwrightCli, "test", `--config=${apiRequestConfigPath}`],
+      { cwd: packageDirectory, env: environment },
+    );
+  } catch (error) {
+    failure = error;
+  }
+  assert.ok(failure);
+  const output = `${failure.stdout ?? ""}\n${failure.stderr ?? ""}`;
+  assert.match(output, /1 passed/u);
+  assert.match(output, /COVERAGE_UNSUPPORTED_API_REQUEST/u);
+  assert.match(output, /Observation coverage: UNSUPPORTED/u);
 });
 
 test("controlled dependency fixture covers new, known, and resolved runtime dependencies", async (t) => {
@@ -373,4 +468,35 @@ test("controlled hidden runtime failures stay functionally green and follow base
   const resolvedReport = await readRuntimeFailureReport(reportPath);
   assert.equal(resolvedReport.inventory.length, 0);
   assert.equal(resolvedReport.baseline.resolved, 4);
+});
+
+test("controlled Playwright shards remain inconclusive until their canonical aggregate is complete", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "privacyspec-playwright-shards-"));
+  t.after(() => rm(directory, { force: true, recursive: true }));
+
+  const firstRun = await runDependencyShard({ part: 1, total: 2, outputDirectory: directory });
+  const secondRun = await runDependencyShard({ part: 2, total: 2, outputDirectory: directory });
+  assert.match(`${firstRun.stdout}\n${firstRun.stderr}`, /baseline-ineligible/u);
+  assert.match(`${secondRun.stdout}\n${secondRun.stderr}`, /baseline-ineligible/u);
+
+  const runDirectory = join(directory, "local-sharded-run");
+  const first = await readPrivacySpecRunPart(join(runDirectory, "part-1-of-2.json"));
+  const second = await readPrivacySpecRunPart(join(runDirectory, "part-2-of-2.json"));
+  assert.equal(first.report.analysis.status, "inconclusive");
+  assert.equal(second.report.analysis.status, "inconclusive");
+  assert.equal(first.report.baseline.resolved.length, 0);
+  assert.equal(second.report.baseline.resolved.length, 0);
+
+  const partial = aggregatePrivacySpecRunParts([first]);
+  assert.equal(partial.scope.complete, false);
+  assert.equal(partial.report.analysis.status, "inconclusive");
+
+  const complete = aggregatePrivacySpecRunParts([second, first]);
+  const canonical = aggregatePrivacySpecRunParts([first, second]);
+  assert.deepEqual(complete, canonical);
+  assert.equal(complete.scope.complete, true);
+  assert.equal(complete.report.run.tests.total, 2);
+  assert.equal(complete.report.analysis.dependencies.coverage, "complete");
+  assert.equal(complete.report.analysis.dependencies.inventory.length, 2);
+  assert.equal(complete.report.analysis.status, "review");
 });

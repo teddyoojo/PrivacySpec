@@ -15,7 +15,7 @@ const LONG_HEX_PATH_SEGMENT = /^[0-9a-f]{16,}$/iu;
 const HIGH_ENTROPY_URL_SAFE_ID = /^(?=.{16,80}$)(?=.*[a-z])(?=.*[A-Z])(?=.*\d)[A-Za-z0-9_-]+$/u;
 const LOWERCASE_OPAQUE_ID = /^(?=.{16,80}$)(?=.*[a-z])(?=.*\d)[a-z0-9]+$/u;
 const PREFIXED_COMPOSITE_INSTANCE_ID =
-  /^(?=.{12,80}$)(?!v\d_)[a-z0-9]{2}_(?:[a-z][a-z0-9]{2,}_)+[a-z][a-z0-9]{2,}$/u;
+  /^(?=.{12,80}$)(?!v\d_)[a-z0-9]{2}_(?:[a-z][a-z0-9]{2,}_)+[a-z][a-z0-9]{2,}_?$/u;
 const REPRESENTATION_SUFFIX = /^(.*?)(\.[a-z][a-z0-9]{0,9})$/iu;
 
 export const redactSensitive = (

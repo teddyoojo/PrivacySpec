@@ -202,6 +202,7 @@ export interface NetworkRequestMetadata {
   method: string;
   resourceType: string;
   frameKind: "main" | "child" | "unknown";
+  requestSurface: "browser" | "api-request";
   timestamp: number;
 }
 
@@ -227,6 +228,7 @@ export const snapshotNetworkRequestMetadata = (
   method: request.method(),
   resourceType: request.resourceType(),
   frameKind: requestFrameKind(request),
+  requestSurface: "browser",
   timestamp,
 });
 
@@ -289,6 +291,7 @@ const captureRequest = async (snapshot: RequestEventSnapshot): Promise<RawNetwor
 
   return {
     kind: "network",
+    requestSurface: "browser",
     url: snapshot.url,
     method: snapshot.method,
     resourceType: snapshot.resourceType,
