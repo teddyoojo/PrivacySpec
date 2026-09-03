@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>PrivacySpec Demo SaaS</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="/customers" data-link>Demo SaaS</a>
+        <nav aria-label="Primary navigation">
+          <ul class="nav-list">
+            <li><a href="/customers" data-link>Customers</a></li>
+            <li><a href="/search" data-link>Search</a></li>
+            <li><a href="/team" data-link>Team</a></li>
+            <li><a href="/support" data-link>Support</a></li>
+            <li><a href="/settings" data-link>Settings</a></li>
+          </ul>
+        </nav>
+        <div class="auth-actions">
+          <a href="/login" data-link data-login-link>Log in</a>
+          <button type="button" class="secondary compact" data-action="logout" hidden>
+            Log out
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main id="app" class="page" tabindex="-1" aria-live="polite">
+      <p>Loading demo application…</p>
+    </main>
+
+    <noscript>This demo application requires JavaScript.</noscript>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

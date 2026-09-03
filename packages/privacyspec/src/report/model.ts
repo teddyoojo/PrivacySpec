@@ -27,7 +27,7 @@ export const REPORT_SCHEMA_VERSION_V2 = 2 as const;
 export const REPORT_SCHEMA_VERSION_V3 = 3 as const;
 export const REPORT_SCHEMA_VERSION_V4 = 4 as const;
 export const REPORT_SCHEMA_VERSION = 5 as const;
-export const PRIVACYSPEC_TOOL_VERSION = "0.1.0-beta.3" as const;
+export const PRIVACYSPEC_TOOL_VERSION = "0.1.0-beta.4" as const;
 export const DEFAULT_REPORT_PATH = "privacyspec-report.json";
 
 export type PrivacySpecRunStatus = "passed" | "review" | "failed" | "incomplete";

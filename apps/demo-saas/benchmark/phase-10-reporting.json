@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "phase-10-reporting-and-ci",
+  "recordedAt": "2026-08-20T11:08:47.366Z",
+  "command": "pnpm exec playwright test --project=chromium",
+  "runCount": 5,
+  "allRunsPassed": true,
+  "durationsMilliseconds": [5979, 5812, 5599, 5612, 5752],
+  "medianMilliseconds": 5752,
+  "cleanMode": {
+    "intentionalLeakFlagsEnabled": 0,
+    "forcedDisabledFlagCount": 8
+  },
+  "runtime": {
+    "node": "v24.19.0",
+    "packageManager": "pnpm@11.21.0",
+    "playwright": "1.62.1",
+    "platform": "linux",
+    "release": "6.18.33.2-microsoft-standard-WSL2",
+    "architecture": "x64",
+    "cpuModel": "AMD Ryzen 5 7500F 6-Core Processor",
+    "logicalCpuCount": 12
+  },
+  "comparison": {
+    "baselineBenchmark": "phase-2-clean-playwright-baseline",
+    "baselineMedianMilliseconds": 5736,
+    "overheadPercent": 0.28
+  }
+}

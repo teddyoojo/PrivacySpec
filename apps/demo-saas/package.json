@@ -1,0 +1,24 @@
+{
+  "name": "@privacyspec/demo-saas",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "benchmark": "node scripts/benchmark.mjs",
+    "build": "tsc --project tsconfig.json && tsc --project tsconfig.playwright.json",
+    "start": "node dist/server.js",
+    "test": "pnpm run test:unit && pnpm run test:e2e",
+    "test:e2e": "pnpm run build && playwright test",
+    "test:unit": "pnpm run build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "express": "5.2.1"
+  },
+  "devDependencies": {
+    "@privacyspec/playwright": "workspace:*",
+    "@playwright/test": "1.62.1",
+    "@types/express": "5.0.6",
+    "@types/node": "24.13.3"
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "benchmarkSchemaVersion": 1,
+  "archetypes": [
+    {
+      "id": "minimal",
+      "title": "Minimal Playwright suite",
+      "supportedHappyPath": true,
+      "expectedCoverage": "complete",
+      "expectedReasonCode": null,
+      "behaviorEvidence": ["test/fixture-compatibility.test.mjs"]
+    },
+    {
+      "id": "shared-fixture",
+      "title": "Shared custom fixture",
+      "supportedHappyPath": true,
+      "expectedCoverage": "complete",
+      "expectedReasonCode": null,
+      "behaviorEvidence": ["test/fixture-compatibility.test.mjs"]
+    },
+    {
+      "id": "setup-auth",
+      "title": "Setup and authentication project",
+      "supportedHappyPath": true,
+      "expectedCoverage": "complete",
+      "expectedReasonCode": null,
+      "behaviorEvidence": ["test/reporter-playwright.test.mjs"]
+    },
+    {
+      "id": "browser-matrix",
+      "title": "Multi-project browser matrix",
+      "supportedHappyPath": false,
+      "expectedCoverage": "unsupported",
+      "expectedReasonCode": "COVERAGE_UNSUPPORTED_BROWSER_ENGINE",
+      "behaviorEvidence": ["fixtures/cross-engine/playwright.config.mjs"]
+    },
+    {
+      "id": "sharded",
+      "title": "Sharded CI",
+      "supportedHappyPath": false,
+      "expectedCoverage": "complete-after-aggregate",
+      "expectedReasonCode": null,
+      "behaviorEvidence": ["test/run-scope.test.mjs", "test/reporter-playwright.test.mjs"]
+    },
+    {
+      "id": "custom-context",
+      "title": "Independent BrowserContext architecture",
+      "supportedHappyPath": false,
+      "expectedCoverage": "unsupported",
+      "expectedReasonCode": "COVERAGE_INCOMPATIBLE",
+      "behaviorEvidence": ["fixtures/reporter-mixed-context/playwright.config.mjs"]
+    },
+    {
+      "id": "monorepo",
+      "title": "Monorepo test package",
+      "supportedHappyPath": false,
+      "expectedCoverage": "complete",
+      "expectedReasonCode": null,
+      "behaviorEvidence": ["test/workspace.test.mjs"]
+    }
+  ]
+}

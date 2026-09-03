@@ -32,15 +32,75 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install Chromium and system dependencies
-        run: pnpm --filter @privacyspec/playwright exec playwright install --with-deps chromium
+      - name: Install Chromium, Firefox, WebKit, and system dependencies
+        run: pnpm --filter @privacyspec/playwright exec playwright install --with-deps chromium firefox webkit
 
       - name: Check formatting and lint
         run: pnpm check
 
       - name: Build and test
+        id: tests
         run: pnpm test
 
-      - name: Verify npm package contents
-        run: npm pack --dry-run --json
-        working-directory: packages/privacyspec
+      - name: Run narrow experimental cross-engine fixture
+        if: steps.tests.outcome == 'success'
+        env:
+          PRIVACYSPEC_CROSS_ENGINE_REPORT_PATH: cross-engine-report.json
+        run: >-
+          pnpm --filter @privacyspec/playwright exec playwright test
+          --config=fixtures/cross-engine/playwright.config.mjs
+
+      - name: Verify experimental cross-engine report
+        if: steps.tests.outcome == 'success'
+        run: >-
+          pnpm --filter @privacyspec/playwright exec node
+          fixtures/cross-engine/verify-report.mjs cross-engine-report.json
+
+      - name: Verify ungated Firefox and WebKit fail closed
+        if: steps.tests.outcome == 'success'
+        env:
+          PRIVACYSPEC_ENGINE_GATED: "false"
+        run: |
+          for engine in firefox webkit; do
+            if pnpm --filter @privacyspec/playwright exec playwright test --config=fixtures/cross-engine/playwright.config.mjs --project="$engine"; then
+              echo "Ungated $engine unexpectedly produced a supported PrivacySpec result."
+              exit 1
+            fi
+          done
+
+      - name: Produce distinct PrivacySpec shard parts
+        id: privacyspec_shards
+        if: steps.tests.outcome == 'success'
+        env:
+          PRIVACYSPEC_CONFIGURATION_ID: ci-dependency-observer-v1
+          PRIVACYSPEC_DEPENDENCY_FIXTURE_MODE: none
+          PRIVACYSPEC_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
+          PRIVACYSPEC_RUN_PARTS_DIRECTORY: .privacyspec-parts
+        run: |
+          pnpm --filter @privacyspec/playwright exec playwright test --config=fixtures/dependency-observer/playwright.config.mjs --shard=1/2
+          pnpm --filter @privacyspec/playwright exec playwright test --config=fixtures/dependency-observer/playwright.config.mjs --shard=2/2
+
+      - name: Aggregate PrivacySpec shard parts
+        id: privacyspec_aggregate
+        if: steps.privacyspec_shards.outcome == 'success'
+        working-directory: apps/demo-saas
+        run: >-
+          node ../../packages/privacyspec/dist/cli/index.js aggregate
+          --part ../../packages/privacyspec/.privacyspec-parts/ci-${{ github.run_id }}-${{ github.run_attempt }}/part-1-of-2.json
+          --part ../../packages/privacyspec/.privacyspec-parts/ci-${{ github.run_id }}-${{ github.run_attempt }}/part-2-of-2.json
+
+      - name: Smoke-test local PrivacySpec summary Action
+        id: privacyspec_summary
+        if: always() && steps.privacyspec_aggregate.outcome == 'success'
+        uses: ./
+        with:
+          working-directory: apps/demo-saas
+          report-path: privacyspec-report.json
+          artifact-name: privacyspec-ci-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: "1"
+
+      - name: Verify PrivacySpec Step Summary marker
+        if: always() && steps.privacyspec_aggregate.outcome == 'success'
+        env:
+          PRIVACYSPEC_SUMMARY_WRITTEN: ${{ steps.privacyspec_summary.outputs.summary-written }}
+        run: test "$PRIVACYSPEC_SUMMARY_WRITTEN" = "true"

@@ -256,11 +256,10 @@ test("reporter emits bounded dependency reviews and an independent baseline life
   });
   const rendered = output.join("");
   assert.equal(endResult, undefined, rendered);
-  assert.match(rendered, /runtime dependencies: origins=2, external=2, requests=3/u);
-  assert.match(rendered, /dependencies\s+REVIEW \(coverage=COMPLETE, changes=2, origins=2\)/u);
-  assert.match(rendered, /NEW_EXTERNAL_ORIGIN https:\/\/api\.newvendor\.test as origin/u);
-  assert.match(rendered, /NEW_EXTERNAL_API https:\/\/api\.newvendor\.test as fetch\/xhr/u);
-  assert.match(rendered, /Secondary coverage: REVIEW/u);
+  assert.match(rendered, /Dependencies\s+REVIEW\s+2 changes; 2 origins/u);
+  assert.match(rendered, /NEW runtime dependency: https:\/\/api\.newvendor\.test · origin/u);
+  assert.match(rendered, /NEW runtime dependency: https:\/\/api\.newvendor\.test · fetch\/xhr/u);
+  assert.match(rendered, /Secondary coverage\s+REVIEW/u);
   assert.match(rendered, /PrivacySpec result: REVIEW/u);
   assert.doesNotMatch(rendered, /malicious|untrusted|violation|compromise/iu);
 
@@ -991,8 +990,8 @@ test("reporter treats a namespaced privacy analyzer failure as inconclusive", as
     undefined,
   );
   assert.match(output.join(""), /PS_ANALYZER_PRIVACY_FAILED/u);
-  assert.match(output.join(""), /Observation coverage: INCOMPLETE/u);
-  assert.match(output.join(""), /Secondary coverage: INCONCLUSIVE/u);
+  assert.match(output.join(""), /Observation coverage\s+INCOMPLETE/u);
+  assert.match(output.join(""), /Secondary coverage\s+INCONCLUSIVE/u);
   assert.match(output.join(""), /PrivacySpec result: INCOMPLETE/u);
 });
 

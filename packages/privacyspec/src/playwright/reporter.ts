@@ -2754,7 +2754,15 @@ export default class PrivacySpecReporter implements Reporter {
             : "incomplete";
     if (timingAvailable) {
       this.#write(renderSecondaryCoverageSummary(unifiedReport));
-      for (const detail of terminalDetails) this.#write(detail);
+      for (const detail of terminalDetails.filter(
+        (message) =>
+          message.startsWith("PrivacySpec JSON report:") ||
+          message.startsWith("PrivacySpec run part:") ||
+          message.startsWith("PrivacySpec run scope:") ||
+          message.startsWith("PrivacySpec report profile:"),
+      )) {
+        this.#write(detail);
+      }
     }
     for (const error of this.#integrationErrors) {
       this.#write(`PrivacySpec integration error: ${error}\n`);

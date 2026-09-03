@@ -1,7 +1,7 @@
 # Release process
 
-PrivacySpec has a public 0.x beta. The current release is tagged `v0.1.0-beta.3`, the package is
-`@privacyspec/playwright@0.1.0-beta.3`, and the public repository is
+PrivacySpec has a public 0.x beta. The current release is tagged `v0.1.0-beta.4`, the package is
+`@privacyspec/playwright@0.1.0-beta.4`, and the public repository is
 [`teddyoojo/PrivacySpec`](https://github.com/teddyoojo/PrivacySpec). Install prerelease builds using
 the explicit beta channel:
 
@@ -13,18 +13,12 @@ For the 0.1.0 beta series, both the `beta` and `latest` dist-tags point to the c
 Documentation advertises `@beta` so consumers do not accidentally opt into a
 future stable channel or mistake the current contracts for stable ones.
 
-## Trusted publisher
-
-The npm trusted publisher is scoped to GitHub owner `teddyoojo`, repository `PrivacySpec`, workflow
-`publish.yml`, and the `npm stage publish` action only. The public workflow uses a GitHub-hosted
-runner with `id-token: write`; it does not use a traditional npm publishing token.
-
 ## Current release contract
 
 - Project, package, and CLI names are `PrivacySpec`, `@privacyspec/playwright`, and `privacyspec`.
 - Source and package license are Apache-2.0.
 - The root workspace remains private because it is not an npm package; the package manifest is
-  publishable and identifies version `0.1.0-beta.3`.
+  publishable and identifies version `0.1.0-beta.4`.
 - Playwright `>=1.58.1 <2` is the supported peer range; 1.58.1 and the pinned 1.62.1 development
   version are acceptance targets.
 - Report v5, attachment v5, run-part v3, privacy baseline/latest-run v2, and inventory/evidence v2

@@ -4,6 +4,46 @@ All notable changes to PrivacySpec are recorded here.
 
 ## Unreleased
 
+## 0.1.0-beta.4 — 2026-09-03
+
+### Added
+
+- A zero-friction product contract and active adoption roadmap with a release-blocking integration
+  budget, explicit current-state reconciliation, and evidence gates for category/framework growth.
+- Provider-neutral GitLab and generic CI guides that reuse the existing Playwright reporter and
+  CLI, preserve exit semantics, require explicit shard aggregation, and prohibit CI baseline
+  mutation.
+- A versioned structural integration-friction benchmark over seven Playwright repository shapes,
+  with computed release gates for touched files, integration lines, unchanged test bodies,
+  assertions, commands, environment, and proxy/certificate setup.
+- `privacyspec doctor` with strict current-report input, deterministic terminal/JSON setup
+  confidence, fixed-code and count-only diagnostics, optional-baseline context, semantic-result
+  exit zero, and no repository/configuration crawling or sensitive report-payload replay.
+- A framework-object-free synthetic runtime-adapter harness proving that the existing normalized
+  event/analyzer seam preserves canonical four-module semantics across permitted input orders and
+  propagates adapter-owned missing capabilities to module and overall inconclusive states.
+- A manually completed, local-only independent-evaluation record for integration effort, coverage,
+  bounded limits, comparable overhead, explicit human signal labels, and the keep-enabled decision,
+  with negative and unsupported outcomes retained and no automatic collection or upload.
+
+### Changed
+
+- The root and package READMEs now lead with a concrete passing-test/secondary-finding example,
+  keep installation and capabilities concise, and route technical depth through the maintainer and
+  coding-agent project guide instead of duplicating reference documentation.
+- Project planning now prioritizes measurable setup friction, first-run comprehension, integration
+  diagnosis, and portability proof over scanner or analyzer breadth.
+- Terminal secondary coverage now leads with a compact functional/observation/module hierarchy,
+  globally caps prioritized actionable semantic groups at five, states omissions and optional
+  baseline status, and leaves verbose occurrence, mapping, performance, and module evidence in
+  strict private artifacts instead of replaying it after the summary.
+
+### Compatibility
+
+- Persisted schema versions and the supported Playwright `>=1.58.1 <2` plus Chromium boundary are
+  unchanged. The `doctor` command is additive; Firefox, WebKit, and composed request observation
+  remain explicit fail-closed experiments.
+
 ## 0.1.0-beta.3 — 2026-08-24
 
 ### Added
@@ -143,7 +183,8 @@ All notable changes to PrivacySpec are recorded here.
   remain distinct.
 - Raw browser-event counts can vary without changing semantic coverage. A relevant application-level
   cancellation may require review if it appears only as a filtered benign abort.
-- The release candidate passed the complete independent repository matrix.
+- The release candidate passed the complete independent repository matrix summarized in
+  `docs/validation.md`.
 
 ### Compatibility
 

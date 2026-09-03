@@ -113,7 +113,16 @@ const temporaryDirectory = async (context) => {
   return directory;
 };
 
-const emptyReport = ({ complete = true, testDataObservations = [], secondaryAnalysis } = {}) =>
+const emptyReport = ({
+  complete = true,
+  testDataObservations = [],
+  secondaryAnalysis,
+  observationCoverage,
+  browserEngineCoverage,
+  apiRequestCoverage,
+  diagnostics = [],
+  integrationErrors = [],
+} = {}) =>
   createPrivacySpecReport({
     generatedAt: "2026-08-20T12:00:00.000Z",
     startedAt: "2026-08-20T11:59:59.000Z",
@@ -138,12 +147,15 @@ const emptyReport = ({ complete = true, testDataObservations = [], secondaryAnal
     findings: [],
     comparison: { observed: [], known: [], new: [], resolved: [] },
     baselineExists: false,
-    diagnostics: [],
-    integrationErrors: [],
+    diagnostics,
+    integrationErrors,
     ruleMappings: [],
     profileMappings: [],
     testDataObservations,
     secondaryAnalysis,
+    observationCoverage,
+    browserEngineCoverage,
+    apiRequestCoverage,
   });
 
 const completeSecondaryAnalysis = ({ dependencyFindings = [], runtimeFindings = [] } = {}) => ({
@@ -263,6 +275,7 @@ test("package exposes a working privacyspec binary", async () => {
   assert.match(stdout, /privacyspec baseline propose/u);
   assert.match(stdout, /privacyspec baseline accept/u);
   assert.match(stdout, /privacyspec summary/u);
+  assert.match(stdout, /privacyspec doctor/u);
   assert.match(stdout, /privacyspec inventory/u);
   assert.match(stdout, /privacyspec testdata/u);
   assert.match(stdout, /privacyspec testdata scan <path\.\.\.>/u);
@@ -377,6 +390,253 @@ test("summary rejects legacy, malformed, missing, and unsupported reports", asyn
   const unsupported = await invoke(["summary"], { cwd });
   assert.equal(unsupported.exitCode, 1);
   assert.match(unsupported.stderr, /unsupported PrivacySpec JSON report schema/u);
+});
+
+test("doctor reports sanitized setup confidence in terminal and JSON", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const report = emptyReport({ secondaryAnalysis: completeSecondaryAnalysis() });
+  await writePrivacySpecReport(join(cwd, DEFAULT_REPORT_PATH), report);
+
+  const terminal = await invoke(["doctor"], { cwd });
+  assert.equal(terminal.exitCode, 0);
+  assert.equal(terminal.stderr, "");
+  assert.match(terminal.stdout, /^PrivacySpec Integration Doctor\n/u);
+  assert.match(terminal.stdout, /Setup confidence\s+READY/u);
+  assert.match(terminal.stdout, /Reporter artifact\s+READABLE\s+strict schema v5/u);
+  assert.match(terminal.stdout, /Fixture observations\s+PRESENT\s+1\/1 attempts observed/u);
+  assert.match(terminal.stdout, /Observation coverage\s+COMPLETE\s+contexts 1\/1; pages 1\/1/u);
+  assert.match(terminal.stdout, /Browser coverage\s+SUPPORTED/u);
+  assert.match(terminal.stdout, /API request fixture\s+NOT_USED/u);
+  assert.match(terminal.stdout, /Baselines\s+OPTIONAL/u);
+  assert.doesNotMatch(terminal.stdout, /privacyspec-report\.json/u);
+
+  const json = await invoke(["doctor", "--format", "json"], { cwd });
+  assert.equal(json.exitCode, 0);
+  assert.equal(json.stderr, "");
+  const diagnosis = JSON.parse(json.stdout);
+  assert.equal(diagnosis.doctorSchemaVersion, 1);
+  assert.equal(diagnosis.setupConfidence, "ready");
+  assert.deepEqual(diagnosis.reporterArtifact, { readable: true, reportSchemaVersion: 5 });
+  assert.deepEqual(diagnosis.fixtureObservations, {
+    status: "present",
+    attempts: 1,
+    observed: 1,
+  });
+  assert.equal(diagnosis.browserCoverage.status, "supported");
+  assert.deepEqual(diagnosis.browserCoverage.tests, {
+    supported: 1,
+    experimental: 0,
+    unsupported: 0,
+    unavailable: 0,
+  });
+  assert.equal(diagnosis.apiRequestFixture.status, "not-used");
+  assert.deepEqual(diagnosis.baselines, {
+    optionalForFirstValue: true,
+    modules: {
+      privacy: "absent",
+      dependencies: "present",
+      security: "present",
+      runtime: "present",
+    },
+  });
+  assert.deepEqual(diagnosis.integrationErrors, { count: 0 });
+  assert.deepEqual(diagnosis.diagnostics, {
+    coverageCodes: [],
+    reportCount: 0,
+    analyzerCount: 0,
+  });
+  assert.equal(Object.hasOwn(diagnosis, "projects"), false);
+});
+
+test("doctor returns zero for unsupported evidence without echoing report payloads", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const rawPayload = "person@example.test tests/private.spec.ts";
+  const base = emptyReport();
+  const browserEngineCoverage = structuredClone(base.coverage.browserEngines);
+  browserEngineCoverage.tests = {
+    supported: 0,
+    experimental: 0,
+    unsupported: 1,
+    unavailable: 0,
+  };
+  browserEngineCoverage.engines.chromium.tests = 0;
+  browserEngineCoverage.engines.firefox.tests = 1;
+  const report = emptyReport({
+    complete: false,
+    browserEngineCoverage,
+    observationCoverage: {
+      status: "unsupported",
+      tests: { attempts: 1, observed: 1 },
+      browserObjects: { seen: 1 },
+      contexts: { seen: 1, instrumented: 0 },
+      pages: { seen: 1, instrumented: 0, storageCapable: 0 },
+      events: { navigations: 0, network: 0, console: 0 },
+      diagnostics: [
+        {
+          code: "COVERAGE_UNSUPPORTED_BROWSER_ENGINE",
+          message: rawPayload,
+        },
+      ],
+    },
+    diagnostics: [{ code: "PRIVATE_DIAGNOSTIC", message: rawPayload }],
+    integrationErrors: [rawPayload],
+  });
+  await writePrivacySpecReport(join(cwd, DEFAULT_REPORT_PATH), report);
+
+  for (const format of ["terminal", "json"]) {
+    const result = await invoke(["doctor", "--format", format], { cwd });
+    assert.equal(result.exitCode, 0, format);
+    assert.equal(result.stderr, "", format);
+    assert.match(result.stdout, /COVERAGE_UNSUPPORTED_BROWSER_ENGINE/u, format);
+    assert.doesNotMatch(result.stdout, /person@example\.test|private\.spec\.ts/u, format);
+  }
+
+  const diagnosis = JSON.parse((await invoke(["doctor", "--format", "json"], { cwd })).stdout);
+  assert.equal(diagnosis.setupConfidence, "not-established");
+  assert.equal(diagnosis.browserCoverage.status, "unsupported");
+  assert.deepEqual(diagnosis.diagnostics.coverageCodes, ["COVERAGE_UNSUPPORTED_BROWSER_ENGINE"]);
+  assert.equal(diagnosis.diagnostics.reportCount, 1);
+  assert.deepEqual(diagnosis.integrationErrors, { count: 1 });
+});
+
+test("doctor distinguishes experimental browser and partial request-fixture evidence", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const base = emptyReport();
+  const browserEngineCoverage = structuredClone(base.coverage.browserEngines);
+  browserEngineCoverage.tests = {
+    supported: 0,
+    experimental: 1,
+    unsupported: 0,
+    unavailable: 0,
+  };
+  browserEngineCoverage.engines.chromium.tests = 0;
+  browserEngineCoverage.engines.firefox = {
+    tests: 1,
+    support: "experimental",
+    capabilities: Object.fromEntries(
+      Object.keys(browserEngineCoverage.engines.firefox.capabilities).map((capability) => [
+        capability,
+        "complete",
+      ]),
+    ),
+  };
+  const apiRequestCoverage = structuredClone(base.coverage.apiRequests);
+  apiRequestCoverage.tests = {
+    enabled: 1,
+    disabled: 0,
+    unavailable: 0,
+    complete: 0,
+    partial: 1,
+    unsupported: 0,
+  };
+  apiRequestCoverage.calls = { seen: 1, observed: 1, failed: 0, serverErrors: 0 };
+  const report = emptyReport({
+    complete: false,
+    browserEngineCoverage,
+    apiRequestCoverage,
+    observationCoverage: {
+      status: "partial",
+      tests: { attempts: 1, observed: 1 },
+      browserObjects: { seen: 1 },
+      contexts: { seen: 1, instrumented: 1 },
+      pages: { seen: 1, instrumented: 1, storageCapable: 1 },
+      events: { navigations: 1, network: 1, console: 0 },
+      diagnostics: [
+        {
+          code: "COVERAGE_BROWSER_ENGINE_CAPABILITY_LIMITED",
+          message: "Experimental browser-engine coverage was enabled.",
+        },
+        {
+          code: "COVERAGE_API_REQUEST_PARTIAL",
+          message: "The composed request fixture had bounded observation skips.",
+        },
+      ],
+    },
+  });
+  await writePrivacySpecReport(join(cwd, DEFAULT_REPORT_PATH), report);
+
+  const result = await invoke(["doctor", "--format", "json"], { cwd });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stderr, "");
+  const diagnosis = JSON.parse(result.stdout);
+  assert.equal(diagnosis.setupConfidence, "limited");
+  assert.equal(diagnosis.browserCoverage.status, "experimental");
+  assert.equal(diagnosis.browserCoverage.engines.firefox.support, "experimental");
+  assert.equal(diagnosis.apiRequestFixture.status, "partial");
+  assert.deepEqual(diagnosis.apiRequestFixture.calls, { seen: 1, observed: 1 });
+  assert.deepEqual(diagnosis.diagnostics.coverageCodes, [
+    "COVERAGE_API_REQUEST_PARTIAL",
+    "COVERAGE_BROWSER_ENGINE_CAPABILITY_LIMITED",
+  ]);
+});
+
+test("doctor deterministically bounds terminal coverage diagnostics", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const diagnosticCodes = [
+    "COVERAGE_OPTIONAL_OBSERVER_SKIPPED",
+    "COVERAGE_NO_RUNTIME_EVENTS",
+    "COVERAGE_LIMIT_REACHED",
+    "COVERAGE_API_REQUEST_PARTIAL",
+    "COVERAGE_NO_PAGES",
+    "COVERAGE_BROWSER_ENGINE_CAPABILITY_LIMITED",
+  ];
+  const report = emptyReport({
+    complete: false,
+    observationCoverage: {
+      status: "partial",
+      tests: { attempts: 1, observed: 1 },
+      browserObjects: { seen: 1 },
+      contexts: { seen: 1, instrumented: 1 },
+      pages: { seen: 1, instrumented: 1, storageCapable: 1 },
+      events: { navigations: 1, network: 1, console: 0 },
+      diagnostics: diagnosticCodes.map((code) => ({ code, message: "Fixed coverage diagnostic." })),
+    },
+  });
+  await writePrivacySpecReport(join(cwd, DEFAULT_REPORT_PATH), report);
+
+  const terminal = await invoke(["doctor"], { cwd });
+  assert.equal(terminal.exitCode, 0);
+  assert.match(terminal.stdout, /\(\+1 more\)/u);
+  assert.doesNotMatch(terminal.stdout, /COVERAGE_OPTIONAL_OBSERVER_SKIPPED/u);
+
+  const json = await invoke(["doctor", "--format", "json"], { cwd });
+  assert.deepEqual(JSON.parse(json.stdout).diagnostics.coverageCodes, [...diagnosticCodes].sort());
+});
+
+test("doctor rejects non-current reports and treats stdout failure as a command error", async (context) => {
+  const cwd = await temporaryDirectory(context);
+  const current = emptyReport();
+  const schemaV4 = structuredClone(current);
+  schemaV4.schemaVersion = 4;
+  delete schemaV4.coverage.browserEngines;
+  delete schemaV4.coverage.apiRequests;
+  await writeFile(join(cwd, DEFAULT_REPORT_PATH), `${JSON.stringify(schemaV4)}\n`, "utf8");
+
+  const legacy = await invoke(["doctor"], { cwd });
+  assert.equal(legacy.exitCode, 1);
+  assert.match(legacy.stderr, /requires the current unified report schema v5/u);
+
+  await writeFile(join(cwd, DEFAULT_REPORT_PATH), "not-json", "utf8");
+  const malformed = await invoke(["doctor"], { cwd });
+  assert.equal(malformed.exitCode, 1);
+  assert.match(malformed.stderr, /not valid JSON/u);
+
+  await writePrivacySpecReport(join(cwd, DEFAULT_REPORT_PATH), current);
+  const stderr = [];
+  const unwritable = await runCli(["doctor"], {
+    cwd,
+    writeOut: () => {
+      throw new Error("output sink unavailable");
+    },
+    writeError: (message) => stderr.push(message),
+  });
+  assert.equal(unwritable, 1);
+  assert.match(stderr.join(""), /PrivacySpec CLI error: output sink unavailable/u);
+
+  await rm(join(cwd, DEFAULT_REPORT_PATH));
+  const missing = await invoke(["doctor"], { cwd });
+  assert.equal(missing.exitCode, 1);
+  assert.match(missing.stderr, /No PrivacySpec JSON report/u);
 });
 
 test("testdata scan supports every format and private atomic output", async (context) => {
@@ -1363,6 +1623,19 @@ test("CLI rejects unknown, duplicate, and missing-value flags", async (context) 
       args: ["inventory", "--report", "same.json", "--output", "same.json"],
       message: /must not overwrite/u,
     },
+    { args: ["doctor", "--report"], message: /requires a path value/u },
+    {
+      args: ["doctor", "--report", "one.json", "--report", "two.json"],
+      message: /only once/u,
+    },
+    { args: ["doctor", "--format", "markdown"], message: /Unsupported doctor format/u },
+    { args: ["doctor", "--format"], message: /requires a format value/u },
+    {
+      args: ["doctor", "--format", "json", "--format", "terminal"],
+      message: /only once/u,
+    },
+    { args: ["doctor", "--output", "doctor.json"], message: /Unexpected argument/u },
+    { args: ["doctor", "--unknown"], message: /Unexpected argument/u },
     { args: ["testdata", "--report"], message: /requires a path value/u },
     {
       args: ["testdata", "--report", "one.json", "--report", "two.json"],

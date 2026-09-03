@@ -36,7 +36,8 @@ flowchart LR
 
 - `packages/privacyspec` is the published fixture, reporter, analyzers, rules, baselines, report
   models, and CLI.
-- `examples/basic-playwright` is a runnable public integration with an ordinary Playwright test.
+- `apps/demo-saas` is controlled ground truth: an in-memory application, an ordinary Chromium
+  Playwright suite, a fake third party, and isolated leak flags. It is not production example code.
 
 All processing is local. PrivacySpec has no hosted service, telemetry, account, or runtime network
 lookup. Raw sensitive values may exist only in bounded browser/test-worker memory; the complete
@@ -72,6 +73,26 @@ test. This establishes co-observation, not proof that the input caused the sink;
 delivery is not treated as a causal clock. Response-discovered sources are stricter: a monotonic
 worker sequence and transient request identity restrict them to later sinks and exclude their own
 originating request.
+
+## Adapter boundary and portability proof
+
+The Playwright adapter owns framework lifecycle wiring, browser/context/page/test identity,
+capture timing, event ordering, and truthful capability state. The runtime core owns the normalized
+event union, capability-to-analyzer coverage resolution, classification, correlation, analyzers,
+findings, and canonical semantic identities. Capability state is passed separately at finalization;
+it is not invented from missing events.
+
+A generic synthetic harness under `packages/privacyspec/fixtures/runtime-portability/` exercises
+this seam without Playwright imports or object types. It emits normalized lifecycle,
+request/response, console, page-error, sensitive-source, storage, cookie, and posture events using
+adapter-owned string identities, then finalizes the existing analyzer host with adapter-owned
+capabilities. Controlled permutations produce the same canonical privacy flows/findings and
+dependency/security/runtime inventories where event order is not semantic. Missing context/page
+capabilities propagate to every module and the unified result as `INCONCLUSIVE`.
+
+This is a portability proof, not a second production adapter or a Selenium support claim.
+Occurrence timing/order may remain adapter-specific, while persisted semantic identity and
+fail-closed capability handling belong to the core.
 
 ## Observation and coverage
 
@@ -176,7 +197,22 @@ The terminal hierarchy reports, in order:
 2. observation coverage;
 3. overall secondary-coverage outcome;
 4. privacy, dependency, security, and runtime module outcomes;
-5. bounded change counts and actionable details.
+5. at most five prioritized actionable semantic groups and an omitted count;
+6. an optional-baseline hint and the private JSON-report handoff.
+
+The concise section prioritizes objective technical failures, coverage/integration blockers, new
+runtime dependencies, sensitive external flows, and remaining module changes. Repeated identities
+are aggregated and accepted known observations are excluded. The reporter does not replay the old
+per-module finding, legal-mapping, and performance dump after this section; occurrence evidence,
+expanded mappings, performance, and module details remain in strict private artifacts and focused
+CLI exports.
+
+The read-only integration doctor is a derived projection of one strict current schema-v5 report.
+It does not inspect the repository or execute Playwright configuration. Its schema-v1 JSON and
+terminal renderers retain only bounded counters, fixed engine/status names, fixed coverage codes,
+per-module baseline presence, and integration-error counts; report paths, test/project identities,
+diagnostic messages, and integration-error payloads are excluded. A valid limited diagnosis does
+not replace reporter exit policy.
 
 `FAIL` takes precedence over inconclusive coverage, then review, then pass. A module without
 complete observation is `INCONCLUSIVE`, never a clean result.

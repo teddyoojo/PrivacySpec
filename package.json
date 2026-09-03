@@ -1,6 +1,6 @@
 {
   "name": "privacyspec",
-  "version": "0.1.0-beta.2",
+  "version": "0.0.0",
   "private": true,
   "license": "Apache-2.0",
   "repository": {
@@ -9,17 +9,21 @@
   },
   "packageManager": "pnpm@11.21.0",
   "engines": {
-    "node": ">=22.18.0"
+    "node": "24.19.0"
   },
   "scripts": {
-    "build": "pnpm --filter @privacyspec/playwright run build",
+    "benchmark": "pnpm build && pnpm --filter @privacyspec/demo-saas run benchmark",
+    "benchmark:friction": "node packages/privacyspec/scripts/integration-friction-benchmark.mjs",
+    "build": "pnpm --recursive run build",
     "check": "biome check .",
+    "privacyspec": "pnpm --dir apps/demo-saas exec node ../../packages/privacyspec/dist/cli/index.js",
+    "demo": "pnpm --filter @privacyspec/demo-saas run start",
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome lint .",
-    "test": "pnpm run test:package && pnpm run test:example",
-    "test:example": "pnpm --filter @privacyspec/example-basic-playwright run test",
-    "test:package": "pnpm --filter @privacyspec/playwright run test"
+    "test": "pnpm --recursive run test",
+    "test:demo": "pnpm --filter @privacyspec/playwright run build && pnpm --filter @privacyspec/demo-saas run test",
+    "test:e2e": "pnpm --filter @privacyspec/playwright run build && pnpm --filter @privacyspec/demo-saas run test:e2e"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.8",

@@ -6,6 +6,7 @@ import { createPrivacySpecReport } from "../dist/report/model.js";
 import { parsePrivacySpecReport, ReportFormatError } from "../dist/report/read.js";
 import {
   MAX_SECONDARY_COVERAGE_MARKDOWN_BYTES,
+  MAX_SECONDARY_COVERAGE_TERMINAL_ITEMS,
   renderSecondaryCoverageMarkdown,
   renderSecondaryCoverageSummary,
 } from "../dist/report/terminal.js";
@@ -135,7 +136,17 @@ const dependencyFinding = (index, value = `vendor-${index}.example.test`) => ({
 
 test("terminal compatibility and Markdown expose every secondary status", () => {
   const pass = createReport();
-  assert.match(renderSecondaryCoverageSummary(pass), /^PrivacySpec Secondary Coverage\n/u);
+  const terminal = renderSecondaryCoverageSummary(pass);
+  assert.match(terminal, /^PrivacySpec Secondary Coverage\n\n/u);
+  assert.match(terminal, /Functional tests\s+PASS\s+1\/1 passed; 1 observed/u);
+  assert.match(terminal, /Observation coverage\s+COMPLETE/u);
+  assert.match(terminal, /Secondary coverage\s+PASS/u);
+  assert.match(terminal, /Privacy\s+PASS/u);
+  assert.match(terminal, /Dependencies\s+PASS/u);
+  assert.match(terminal, /Security\s+PASS/u);
+  assert.match(terminal, /Runtime\s+PASS/u);
+  assert.match(terminal, /No new secondary findings require action/u);
+  assert.match(terminal, /Baseline tracking: 3\/4 modules configured/u);
 
   for (const status of ["pass", "review", "fail", "inconclusive"]) {
     const report = structuredClone(pass);
@@ -153,6 +164,36 @@ test("terminal compatibility and Markdown expose every secondary status", () => 
       assert.match(markdown, new RegExp(`\\| ${module} \\| ${status.toUpperCase()} \\|`, "u"));
     }
   }
+});
+
+test("terminal output globally prioritizes and caps actionable semantic groups", () => {
+  const report = createReport({ status: "review" });
+  const dependencyFindings = Array.from({ length: 7 }, (_, index) => dependencyFinding(index));
+  report.analysis.dependencies.findings = [...dependencyFindings].reverse();
+  report.analysis.dependencies.baseline.new = dependencyFindings.length;
+  report.analysis.changes.dependencies = dependencyFindings.length;
+  report.analysis.changes.total += dependencyFindings.length;
+  report.coverage.observation.status = "partial";
+  report.coverage.observation.diagnostics = [
+    {
+      code: "COVERAGE_OPTIONAL_OBSERVER_SKIPPED",
+      message: "The optional observer skipped bounded work.",
+    },
+  ];
+
+  const first = renderSecondaryCoverageSummary(report);
+  report.analysis.dependencies.findings.reverse();
+  const second = renderSecondaryCoverageSummary(report);
+
+  assert.equal(first, second);
+  assert.equal(MAX_SECONDARY_COVERAGE_TERMINAL_ITEMS, 5);
+  assert.equal((first.match(/^ {2}(?:OBSERVATION|NEW)/gmu) ?? []).length, 5);
+  assert.ok(
+    first.indexOf("OBSERVATION COVERAGE_OPTIONAL") < first.indexOf("NEW runtime dependency"),
+  );
+  assert.doesNotMatch(first, /NEW external recipient/u);
+  assert.match(first, /4 additional actionable groups omitted/u);
+  assert.doesNotMatch(first, /customer can be created/u);
 });
 
 test("Markdown uses deterministic module ordering, item limits, and incomplete resolved counts", () => {

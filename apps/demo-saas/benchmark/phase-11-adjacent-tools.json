@@ -1,0 +1,144 @@
+{
+  "phase": 11,
+  "recordedAt": "2026-08-20",
+  "environment": {
+    "node": "24.19.0",
+    "pnpm": "11.21.0",
+    "platform": "linux",
+    "architecture": "x64",
+    "environmentLabel": "WSL2, AMD Ryzen 5 7500F, 12 logical CPUs"
+  },
+  "scenario": {
+    "name": "stateful customer creation with intentional external email transfer",
+    "demoFlag": "DEMO_LEAK_EMAIL_TO_ANALYTICS",
+    "triggeringTest": "customer can be created",
+    "rawSensitiveValuesPersisted": false
+  },
+  "tools": [
+    {
+      "name": "ConformTest",
+      "version": "0.0.0",
+      "mode": "existing Playwright test, clean accepted baseline",
+      "wallSeconds": 2.67,
+      "scope": {
+        "tests": 1,
+        "routes": null
+      },
+      "observations": {
+        "dataFlows": 3,
+        "findings": 1,
+        "newFindings": 1,
+        "ruleIds": ["CT1004"],
+        "exactSensitiveTransferAttributed": true,
+        "testAttributed": true,
+        "semanticBaselineState": "new"
+      }
+    },
+    {
+      "name": "EDPS Website Evidence Collector",
+      "version": "4.3.0",
+      "mode": "in-memory crawl summary, max 10, depth 1, 500 ms settle delay",
+      "wallSeconds": 3.34,
+      "scope": {
+        "pagesVisited": 1,
+        "requestHosts": {
+          "firstParty": 1,
+          "thirdParty": 0
+        }
+      },
+      "observations": {
+        "cookies": 0,
+        "localStorageOrigins": 0,
+        "localStorageKeys": 0,
+        "beacons": 0,
+        "exactSensitiveTransferAttributed": false,
+        "testAttributed": false,
+        "semanticBaselineState": null
+      }
+    },
+    {
+      "name": "OWASP ZAP",
+      "version": "2.17.0",
+      "mode": "traditional spider plus passive scan, no active attacks",
+      "wallSeconds": 2.12,
+      "coldStartupSeconds": 21.65,
+      "scope": {
+        "alertInstances": 38,
+        "alertTypes": 4
+      },
+      "observations": {
+        "alerts": [
+          {
+            "pluginId": 10038,
+            "risk": "Medium",
+            "name": "Content Security Policy (CSP) Header Not Set",
+            "count": 9
+          },
+          {
+            "pluginId": 10020,
+            "risk": "Medium",
+            "name": "Missing Anti-clickjacking Header",
+            "count": 9
+          },
+          {
+            "pluginId": 10021,
+            "risk": "Low",
+            "name": "X-Content-Type-Options Header Missing",
+            "count": 11
+          },
+          {
+            "pluginId": 10109,
+            "risk": "Informational",
+            "name": "Modern Web Application",
+            "count": 9
+          }
+        ],
+        "exactSensitiveTransferAttributed": false,
+        "testAttributed": false,
+        "semanticBaselineState": null
+      }
+    },
+    {
+      "name": "OWASP Penetration Testing Kit",
+      "version": "9.9.8",
+      "mode": "standalone passive IAST, SAST, and SCA crawl; DAST and form submission disabled",
+      "wallSeconds": 40.53,
+      "scope": {
+        "routes": 8,
+        "endpoints": 24,
+        "forms": 6,
+        "errors": 0
+      },
+      "observations": {
+        "findings": 23,
+        "bySeverity": {
+          "high": 20,
+          "medium": 2,
+          "low": 1
+        },
+        "byEngine": {
+          "IAST": 13,
+          "SAST": 10,
+          "SCA": 0
+        },
+        "exactSensitiveTransferAttributed": false,
+        "testAttributed": false,
+        "semanticBaselineState": null
+      }
+    },
+    {
+      "name": "Project Foxhound",
+      "version": null,
+      "mode": "not run or integrated by design",
+      "wallSeconds": null,
+      "observations": {
+        "reason": "Phase 11 requires documentation only; Foxhound needs a custom Firefox build and provides deeper dynamic taint propagation."
+      }
+    }
+  ],
+  "conclusion": {
+    "meaningfulUniqueSignal": true,
+    "signal": "new semantic personal.email transfer attributed to an external recipient, normalized endpoint, structured request field, and existing Playwright test",
+    "productRisk": "PTK now supports existing Playwright journeys and overlaps substantially in browser-side runtime analysis; a real-repository pilot must test whether ConformTest's automatic privacy-flow baseline remains meaningfully lower-friction and higher-signal."
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:e2e:aggregate": "privacyspec aggregate --part .privacyspec-parts/ci-run/part-1-of-2.json --part .privacyspec-parts/ci-run/part-2-of-2.json"
+  }
+}

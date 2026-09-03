@@ -1,7 +1,7 @@
 {
   "name": "@privacyspec/playwright",
-  "version": "0.1.0-beta.3",
-  "description": "Continuous privacy QA for Playwright",
+  "version": "0.1.0-beta.4",
+  "description": "Secondary runtime coverage for the Playwright tests you already have",
   "license": "Apache-2.0",
   "author": "teddyoojo",
   "repository": {

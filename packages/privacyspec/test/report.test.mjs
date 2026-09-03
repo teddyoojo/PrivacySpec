@@ -173,7 +173,7 @@ test("schema-v5 JSON report unifies module outcomes with privacy evidence and pe
   const metadata = await stat(reportPath);
 
   assert.equal(report.schemaVersion, 5);
-  assert.deepEqual(report.tool, { name: "privacyspec", version: "0.1.0-beta.3" });
+  assert.deepEqual(report.tool, { name: "privacyspec", version: "0.1.0-beta.4" });
   assert.equal(report.generatedAt, "2026-08-20T12:00:00.500Z");
   assert.equal(report.run.playwrightStatus, "passed");
   assert.equal(report.run.privacyspecStatus, "review");
@@ -245,15 +245,17 @@ test("schema-v5 JSON report unifies module outcomes with privacy evidence and pe
 
   const rendered = output.join("");
   assert.match(rendered, /PrivacySpec Secondary Coverage/u);
-  assert.match(rendered, /Functional tests: PASS/u);
-  assert.match(rendered, /Observation coverage: COMPLETE \(contexts=1\/1, pages=1\/1/u);
-  assert.match(rendered, /Secondary coverage: REVIEW/u);
-  assert.match(rendered, /privacy\s+REVIEW \(coverage=COMPLETE, changes=1, flows=1\)/u);
-  assert.match(rendered, /dependencies\s+PASS/u);
-  assert.match(rendered, /technical relevance PS1004: OWASP ASVS 5\.0\.0 V14\.2\.3/u);
-  assert.match(rendered, /EU relevance PS1004: GDPR Article 5\(1\)\(c\)/u);
-  assert.match(rendered, /authoritative sources PS1004: .*github\.com.*eur-lex/u);
-  assert.match(rendered, /performance: suite=500ms, cumulative test duration=125ms/u);
+  assert.match(rendered, /Functional tests\s+PASS\s+1\/1 passed; 1 observed/u);
+  assert.match(rendered, /Observation coverage\s+COMPLETE\s+contexts 1\/1; pages 1\/1/u);
+  assert.match(rendered, /Secondary coverage\s+REVIEW\s+1 change/u);
+  assert.match(rendered, /Privacy\s+REVIEW\s+1 change; 1 flow/u);
+  assert.match(rendered, /Dependencies\s+PASS\s+0 changes; 0 origins/u);
+  assert.match(rendered, /Worth reviewing/u);
+  assert.match(rendered, /NEW external recipient: personal\.email → external-request/u);
+  assert.match(rendered, /Baseline tracking is optional/u);
+  assert.doesNotMatch(rendered, /technical relevance PS1004/u);
+  assert.doesNotMatch(rendered, /EU relevance PS1004/u);
+  assert.doesNotMatch(rendered, /performance: suite=/u);
   assert.match(rendered, /JSON report: .*privacyspec-report\.json \(schema v5\)/u);
   assert.match(
     rendered,
@@ -379,8 +381,9 @@ test("bounded optional observer skips produce partial inconclusive coverage", as
       message: "The optional first-party JSON response observer skipped bounded work.",
     },
   ]);
-  assert.match(output.join(""), /Observation coverage: PARTIAL/u);
-  assert.match(output.join(""), /Secondary coverage: INCONCLUSIVE/u);
+  assert.match(output.join(""), /Observation coverage\s+PARTIAL/u);
+  assert.match(output.join(""), /Secondary coverage\s+INCONCLUSIVE/u);
+  assert.match(output.join(""), /OBSERVATION COVERAGE_OPTIONAL_OBSERVER_SKIPPED/u);
 });
 
 test("observer finalization timeout makes coverage incomplete", async (t) => {
@@ -422,8 +425,9 @@ test("observer finalization timeout makes coverage incomplete", async (t) => {
     ),
     true,
   );
-  assert.match(output.join(""), /Observation coverage: INCOMPLETE/u);
-  assert.match(output.join(""), /Secondary coverage: INCONCLUSIVE/u);
+  assert.match(output.join(""), /Observation coverage\s+INCOMPLETE/u);
+  assert.match(output.join(""), /Secondary coverage\s+INCONCLUSIVE/u);
+  assert.match(output.join(""), /OBSERVATION COVERAGE_OBSERVER_FINALIZATION_INCOMPLETE/u);
 });
 
 test("schema-v5 report persists only sanitized test-data hygiene semantics", async (t) => {

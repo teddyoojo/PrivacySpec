@@ -63,6 +63,9 @@ import {
   writeBaselineFile,
   writeLatestRunFile,
 } from "../baseline/write.js";
+import { createPrivacySpecDoctorReport } from "../doctor/create.js";
+import type { DoctorFormat } from "../doctor/model.js";
+import { renderPrivacySpecDoctorReport } from "../doctor/render.js";
 import { createPrivacySpecEvidence, validateEvidenceIdentifier } from "../evidence/create.js";
 import type { EvidenceFormat } from "../evidence/model.js";
 import { renderPrivacySpecEvidence } from "../evidence/render.js";
@@ -111,6 +114,7 @@ const USAGE = `Usage:
   privacyspec baseline accept [--proposal <path>] [--baseline <path>] [--report <path>] [--select <proposal-id> ...] [--yes]
   privacyspec aggregate --part <path> [--part <path> ...] [--report <path>]
   privacyspec summary [--report <path>] [--format terminal|markdown] [--output <path>]
+  privacyspec doctor [--report <path>] [--format terminal|json]
   privacyspec inventory [--report <path>] [--format terminal|json|csv|markdown] [--output <path>]
   privacyspec testdata [--report <path>] [--format terminal|json|markdown] [--output <path>]
   privacyspec testdata scan <path...> [--format terminal|json|markdown] [--output <path>]
@@ -182,6 +186,12 @@ interface SummaryCommand {
   outputPath?: string | undefined;
 }
 
+interface DoctorCommand {
+  action: "doctor";
+  reportPath: string;
+  format: DoctorFormat;
+}
+
 interface AggregateCommand {
   action: "aggregate";
   partPaths: string[];
@@ -214,6 +224,7 @@ interface EvidenceCommand {
 type CliCommand =
   | AggregateCommand
   | BaselineCommand
+  | DoctorCommand
   | EvidenceCommand
   | ExplainCommand
   | InventoryCommand
@@ -505,6 +516,42 @@ const parseSummaryCommand = (args: readonly string[], cwd: string): SummaryComma
   };
 };
 
+const doctorFormats = new Set<DoctorFormat>(["json", "terminal"]);
+
+const parseDoctorCommand = (args: readonly string[], cwd: string): DoctorCommand => {
+  let reportPath: string | undefined;
+  let format: DoctorFormat = "terminal";
+  let sawFormat = false;
+  for (let index = 1; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--report") {
+      if (reportPath !== undefined) {
+        throw new CliArgumentError("--report may be specified only once.");
+      }
+      reportPath = requireFlagValue(args, index, argument);
+      index += 1;
+      continue;
+    }
+    if (argument === "--format") {
+      if (sawFormat) throw new CliArgumentError("--format may be specified only once.");
+      const value = requireFlagValue(args, index, argument, "format");
+      if (!doctorFormats.has(value as DoctorFormat)) {
+        throw new CliArgumentError(`Unsupported doctor format ${quoted(value)}.`);
+      }
+      format = value as DoctorFormat;
+      sawFormat = true;
+      index += 1;
+      continue;
+    }
+    throw new CliArgumentError(`Unexpected argument ${quoted(argument ?? "")} for doctor.`);
+  }
+  return {
+    action: "doctor",
+    reportPath: resolve(cwd, reportPath ?? DEFAULT_REPORT_PATH),
+    format,
+  };
+};
+
 const parseInventoryCommand = (args: readonly string[], cwd: string): InventoryCommand => {
   let reportPath: string | undefined;
   let format: InventoryFormat = "terminal";
@@ -727,6 +774,7 @@ const parseEvidenceCommand = (args: readonly string[], cwd: string): EvidenceCom
 const parseCliCommand = (args: readonly string[], cwd: string): CliCommand => {
   if (args[0] === "aggregate") return parseAggregateCommand(args, cwd);
   if (args[0] === "summary") return parseSummaryCommand(args, cwd);
+  if (args[0] === "doctor") return parseDoctorCommand(args, cwd);
   if (args[0] === "inventory") return parseInventoryCommand(args, cwd);
   if (args[0] === "testdata" && args[1] === "scan") return parseTestDataScanCommand(args, cwd);
   if (args[0] === "testdata") return parseTestDataCommand(args, cwd);
@@ -1038,6 +1086,18 @@ export const runCli = async (
         await writeInventoryOutput(command.outputPath, output);
         writeOut(`PrivacySpec inventory written to ${quoted(command.outputPath)}.\n`);
       }
+      return 0;
+    }
+
+    if (command.action === "doctor") {
+      const report = await readPrivacySpecReport(command.reportPath);
+      if (report.schemaVersion !== REPORT_SCHEMA_VERSION) {
+        throw new Error(
+          `PrivacySpec doctor requires the current unified report schema v${REPORT_SCHEMA_VERSION}; rerun PrivacySpec with the current package.`,
+        );
+      }
+      const diagnosis = createPrivacySpecDoctorReport(report);
+      writeOut(renderPrivacySpecDoctorReport(diagnosis, command.format));
       return 0;
     }
 

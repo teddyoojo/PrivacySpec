@@ -241,7 +241,7 @@ test("terminal, JSON, and Markdown output are deterministic and private", async 
   );
   const report = {
     ...section,
-    tool: { name: "privacyspec", version: "0.1.0-beta.3" },
+    tool: { name: "privacyspec", version: "0.1.0-beta.4" },
     sourceReport: {
       schemaVersion: 2,
       generatedAt: "2026-08-20T12:00:00.000Z",

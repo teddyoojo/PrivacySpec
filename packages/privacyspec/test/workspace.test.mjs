@@ -14,7 +14,7 @@ const manifest = JSON.parse(await readFile(new URL("../package.json", import.met
 
 test("the PrivacySpec package identifies the public beta", () => {
   assert.equal(manifest.name, "@privacyspec/playwright");
-  assert.equal(manifest.version, "0.1.0-beta.3");
+  assert.equal(manifest.version, "0.1.0-beta.4");
   assert.equal(manifest.publishConfig.access, "public");
   assert.equal(manifest.private, undefined);
   assert.equal(manifest.license, "Apache-2.0");

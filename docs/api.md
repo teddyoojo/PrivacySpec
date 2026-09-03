@@ -175,8 +175,11 @@ It accepts:
 Technical failures and reporter/integration failures always fail PrivacySpec. A failed, skipped,
 interrupted, coverage-limited, or zero-execution run is not eligible to replace the baseline.
 The terminal prints one hierarchy with the functional result, observation coverage, overall
-secondary-coverage result, privacy/dependency/security/runtime module results, and bounded change
-counts. `PARTIAL`, `INCOMPLETE`, and `UNSUPPORTED` observation coverage makes privacy analysis
+secondary-coverage result, privacy/dependency/security/runtime module results, and at most five
+prioritized actionable semantic groups across the whole concise section. It states an omitted
+count, points to the private JSON report, and explains when baseline tracking is optional for
+current-run observations. Accepted known observations are excluded and repeated identities are
+aggregated. `PARTIAL`, `INCOMPLETE`, and `UNSUPPORTED` observation coverage makes privacy analysis
 inconclusive; incomplete coverage in any module prevents an overall clean result. Detected
 custom-context coverage also fails the reporter.
 
@@ -203,6 +206,7 @@ privacyspec baseline propose [--module privacy|dependencies|security|runtime] [-
 privacyspec baseline accept [--proposal <path>] [--baseline <path>] [--report <path>] [--select <proposal-id> ...] [--yes]
 privacyspec aggregate --part <path> [--part <path> ...] [--report <path>]
 privacyspec summary [--report <path>] [--format terminal|markdown] [--output <path>]
+privacyspec doctor [--report <path>] [--format terminal|json]
 privacyspec inventory [--report <path>] [--format terminal|json|csv|markdown] [--output <path>]
 privacyspec testdata [--report <path>] [--format terminal|json|markdown] [--output <path>]
 privacyspec evidence [--report <path>] [--format json|markdown] [--output <path>] [--commit <id>] [--build-id <id>]
@@ -249,12 +253,31 @@ partial modules receive incomplete handoffs. Input order does not affect the sem
 
 `summary` reads `privacyspec-report.json` by default and requires a strict current schema-v5
 unified report because earlier versions do not contain all four analysis modules. Terminal is the
-default; Markdown is deterministic, limited to five actionable items per module and five coverage
-or integration diagnostics, and capped at 64 KiB. It excludes known accepted findings, test
-titles/files, expanded legal mappings, raw values, query strings, request bodies, console
-arguments, and storage values. `--output` cannot overwrite the input and writes atomically with
-mode `0600`. Every valid semantic status returns `0`; only input, rendering, or output errors
-return `1`, independently of reporter failure policy.
+default and globally limits its prioritized actionable section to five semantic groups. Markdown
+is deterministic, limited to five actionable items per module and five coverage or integration
+diagnostics, and capped at 64 KiB. Both exclude known accepted findings, test titles/files,
+expanded legal mappings, raw values, query strings, request bodies, console arguments, and storage
+values. `--output` cannot overwrite the input and writes atomically with mode `0600`. Every valid
+semantic status returns `0`; only input, rendering, or output errors return `1`, independently of
+reporter failure policy.
+
+`doctor` reads `privacyspec-report.json` by default and requires a strict current schema-v5 unified
+report. Terminal is the default; JSON emits deterministic `doctorSchemaVersion: 1` output. Both
+report only sanitized setup evidence: current reporter readability, fixture-observed test attempts,
+run-scope completeness, instrumented/seen context and page counts, supported/experimental/
+unsupported browser counts and fixed engine names, composed request-fixture test/call counts,
+coverage status and fixed diagnostic codes, optional per-module baseline presence, and the
+integration-error count. They omit report paths, project/test identities, diagnostic messages,
+integration-error payloads, and unrecorded configuration claims.
+
+Setup confidence is `READY` only for complete supported observation with instrumented fixture/page
+evidence and no integration error. Evidence with an incomplete scope, partial/experimental/
+unsupported capability, or integration error is `LIMITED`; absent instrumented fixture/page
+evidence is `NOT_ESTABLISHED`. These are integration diagnoses, not CI verdicts. Every valid report
+returns `0`, including limited and unsupported results. Missing, malformed, legacy/future-schema,
+rendering, or stdout-write failures return `1`; the Playwright reporter remains authoritative for
+CI exit policy. The command never crawls the repository or imports/evaluates Playwright
+configuration.
 
 `inventory` reads schema-v1 through schema-v5 `privacyspec-report.json` by default. It rejects
 malformed or unsupported reports, aggregates duplicate occurrences, and emits an independent

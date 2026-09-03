@@ -140,8 +140,8 @@ test("a static Playwright skip does not become a PrivacySpec failure", async () 
   );
   const output = `${stdout}\n${stderr}`;
   assert.match(output, /1 skipped/u);
-  assert.match(output, /Functional tests: PASS \(0\/1 passed; 0 observed\)/u);
-  assert.match(output, /Secondary coverage: INCONCLUSIVE/u);
+  assert.match(output, /Functional tests\s+PASS\s+0\/1 passed; 0 observed/u);
+  assert.match(output, /Secondary coverage\s+INCONCLUSIVE/u);
   assert.doesNotMatch(output, /PrivacySpec integration error/u);
 });
 
@@ -171,7 +171,7 @@ test("browser.newPage outside the fixture context fails coverage integrity", asy
     output,
     /COVERAGE_INCOMPATIBLE: 1 Playwright tests ran but no application BrowserContexts were instrumented/u,
   );
-  assert.match(output, /Observation coverage: UNSUPPORTED/u);
+  assert.match(output, /Observation coverage\s+UNSUPPORTED/u);
   assert.match(output, /PrivacySpec result: FAIL \(functional tests=PASS/u);
 });
 
@@ -197,13 +197,13 @@ test("mixed fixture and independent pages cannot produce false complete coverage
   assert.equal(failure.code, 1);
   const output = `${failure.stdout ?? ""}\n${failure.stderr ?? ""}`;
   assert.match(output, /1 passed/u);
-  assert.match(output, /Observation coverage: UNSUPPORTED \(contexts=1\/3, pages=1\/3/u);
+  assert.match(output, /Observation coverage\s+UNSUPPORTED\s+contexts 1\/3; pages 1\/3/u);
   assert.match(
     output,
     /detected application BrowserContexts or pages outside the instrumented test context/u,
   );
-  assert.match(output, /Secondary coverage: FAIL/u);
-  assert.match(output, /privacy\s+INCONCLUSIVE \(coverage=UNSUPPORTED/u);
+  assert.match(output, /Secondary coverage\s+FAIL/u);
+  assert.match(output, /Privacy\s+INCONCLUSIVE\s+0 changes/u);
 });
 
 test("gated composed request fixture emits API-surface flows and remains baseline-ineligible", async (t) => {
@@ -230,10 +230,11 @@ test("gated composed request fixture emits API-surface flows and remains baselin
   const latestRun = JSON.parse(await readFile(latestRunPath, "utf8"));
 
   assert.match(output, /1 passed/u);
-  assert.match(output, /API request fixture: calls=1, partial=1, unsupported=0/u);
-  assert.match(output, /baseline-ineligible review findings=1/u);
-  assert.match(output, /PrivacySpec baseline: known=0, new=0, resolved=0/u);
-  assert.match(output, /\[NOT_BASELINE_ELIGIBLE\].*\[surface=api-request\]/u);
+  assert.match(output, /Observation coverage\s+PARTIAL/u);
+  assert.match(output, /Secondary coverage\s+INCONCLUSIVE/u);
+  assert.match(output, /Worth reviewing/u);
+  assert.doesNotMatch(output, /API request fixture:/u);
+  assert.doesNotMatch(output, /\[NOT_BASELINE_ELIGIBLE\]/u);
   assert.equal(report.schemaVersion, 5);
   assert.equal(report.coverage.apiRequests.calls.seen, 1);
   assert.equal(report.coverage.apiRequests.tests.partial, 1);
@@ -274,7 +275,7 @@ test("ungated composed request fixture is detected without inspecting arguments 
   const output = `${failure.stdout ?? ""}\n${failure.stderr ?? ""}`;
   assert.match(output, /1 passed/u);
   assert.match(output, /COVERAGE_UNSUPPORTED_API_REQUEST/u);
-  assert.match(output, /Observation coverage: UNSUPPORTED/u);
+  assert.match(output, /Observation coverage\s+UNSUPPORTED/u);
 });
 
 test("controlled dependency fixture covers new, known, and resolved runtime dependencies", async (t) => {
@@ -292,7 +293,7 @@ test("controlled dependency fixture covers new, known, and resolved runtime depe
   });
   const firstOutput = `${first.stdout}\n${first.stderr}`;
   assert.match(firstOutput, /2 passed/u);
-  assert.match(firstOutput, /dependencies\s+REVIEW \(coverage=COMPLETE/u);
+  assert.match(firstOutput, /Dependencies\s+REVIEW\s+5 changes; 2 origins/u);
   assert.match(firstOutput, /PrivacySpec result: REVIEW \(functional tests=PASS/u);
   const firstReport = await readDependencyReport(reportPath);
   assert.equal(firstReport.complete, true);
@@ -314,7 +315,7 @@ test("controlled dependency fixture covers new, known, and resolved runtime depe
     reportPath,
     mode: "external",
   });
-  assert.match(`${known.stdout}\n${known.stderr}`, /dependencies\s+PASS \(coverage=COMPLETE/u);
+  assert.match(`${known.stdout}\n${known.stderr}`, /Dependencies\s+PASS\s+0 changes; 2 origins/u);
   const knownReport = await readDependencyReport(reportPath);
   assert.equal(knownReport.baseline.new, 0);
   assert.equal(knownReport.baseline.known, latestRun.dependencies.length);
@@ -327,7 +328,7 @@ test("controlled dependency fixture covers new, known, and resolved runtime depe
   });
   assert.match(
     `${resolved.stdout}\n${resolved.stderr}`,
-    /dependencies\s+PASS \(coverage=COMPLETE/u,
+    /Dependencies\s+PASS\s+0 changes; 0 origins/u,
   );
   const resolvedReport = await readDependencyReport(reportPath);
   assert.equal(resolvedReport.inventory.length, 0);
@@ -362,7 +363,7 @@ test("controlled security fixture detects a hidden posture regression and baseli
     reportPath,
     mode: "strong",
   });
-  assert.match(`${known.stdout}\n${known.stderr}`, /security\s+PASS \(coverage=COMPLETE/u);
+  assert.match(`${known.stdout}\n${known.stderr}`, /Security\s+PASS\s+0 changes; 2 targets/u);
   assert.equal((await readSecurityReport(reportPath)).baseline.known, 2);
 
   const changed = await runSecurityFixture({
@@ -373,7 +374,7 @@ test("controlled security fixture detects a hidden posture regression and baseli
   });
   const changedOutput = `${changed.stdout}\n${changed.stderr}`;
   assert.match(changedOutput, /2 passed/u);
-  assert.match(changedOutput, /security\s+REVIEW \(coverage=COMPLETE/u);
+  assert.match(changedOutput, /Security\s+REVIEW\s+5 changes; 2 targets/u);
   assert.match(changedOutput, /PrivacySpec result: REVIEW \(functional tests=PASS/u);
   const changedReport = await readSecurityReport(reportPath);
   assert.equal(changedReport.baseline.changed, 2);
@@ -391,7 +392,7 @@ test("controlled security fixture detects a hidden posture regression and baseli
     reportPath,
     mode: "absent",
   });
-  assert.match(`${resolved.stdout}\n${resolved.stderr}`, /security\s+PASS \(coverage=COMPLETE/u);
+  assert.match(`${resolved.stdout}\n${resolved.stderr}`, /Security\s+PASS\s+0 changes; 0 targets/u);
   assert.equal((await readSecurityReport(reportPath)).baseline.resolved, 2);
 });
 
@@ -417,9 +418,9 @@ test("controlled hidden runtime failures stay functionally green and follow base
   assert.equal(firstFailure.code, 1);
   const firstOutput = `${firstFailure.stdout ?? ""}\n${firstFailure.stderr ?? ""}`;
   assert.match(firstOutput, /1 passed/u);
-  assert.match(firstOutput, /runtime\s+FAIL \(coverage=COMPLETE/u);
-  assert.match(firstOutput, /RUNTIME_PAGE_ERROR/u);
-  assert.match(firstOutput, /RUNTIME_HTTP_5XX/u);
+  assert.match(firstOutput, /Runtime\s+FAIL\s+4 changes; 4 failures/u);
+  assert.match(firstOutput, /NEW runtime failure: Uncaught TypeError/u);
+  assert.match(firstOutput, /NEW runtime failure: First-party HTTP 503/u);
   const firstReport = await readRuntimeFailureReport(reportPath);
   assert.equal(firstReport.complete, true);
   assert.deepEqual(firstReport.findings.map((finding) => finding.ruleId).sort(), [
@@ -451,8 +452,8 @@ test("controlled hidden runtime failures stay functionally green and follow base
   });
   const knownOutput = `${known.stdout}\n${known.stderr}`;
   assert.match(knownOutput, /1 passed/u);
-  assert.match(knownOutput, /runtime\s+PASS \(coverage=COMPLETE/u);
-  assert.match(knownOutput, /dependencies\s+REVIEW \(coverage=COMPLETE/u);
+  assert.match(knownOutput, /Runtime\s+PASS\s+0 changes; 4 failures/u);
+  assert.match(knownOutput, /Dependencies\s+REVIEW\s+2 changes; 2 origins/u);
   assert.match(knownOutput, /PrivacySpec result: REVIEW \(functional tests=PASS/u);
   const knownReport = await readRuntimeFailureReport(reportPath);
   assert.equal(knownReport.findings.length, 0);
@@ -464,7 +465,7 @@ test("controlled hidden runtime failures stay functionally green and follow base
     reportPath,
     mode: "none",
   });
-  assert.match(`${resolved.stdout}\n${resolved.stderr}`, /runtime\s+PASS \(coverage=COMPLETE/u);
+  assert.match(`${resolved.stdout}\n${resolved.stderr}`, /Runtime\s+PASS\s+0 changes; 0 failures/u);
   const resolvedReport = await readRuntimeFailureReport(reportPath);
   assert.equal(resolvedReport.inventory.length, 0);
   assert.equal(resolvedReport.baseline.resolved, 4);
